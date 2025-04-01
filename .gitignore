@@ -1,0 +1,88 @@
+# 数据目录和文件
+/data/
+/datasets/
+*.jpg
+*.png
+*.jpeg
+*.bmp
+*.gif
+*.mp4
+*.avi
+*.mkv
+*.h5
+*.npy
+*.npz
+*.pkl
+*.pt
+*.pth
+*.bin
+
+# 模型权重和检查点
+*.ckpt
+*.safetensors
+*.onnx
+/models/
+/checkpoints/
+
+# Python缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 虚拟环境
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.env
+.venv
+.python-version
+
+# 日志和临时文件
+logs/
+*.log
+*.tmp
+tmp/
+temp/
+
+# IDE相关
+.idea/
+.vscode/
+*.swp
+*.swo
+.project
+.pydevproject
+.settings/
+*.sublime-workspace
+.DS_Store
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+*.ipynb
+!notebooks/*.ipynb
+
+# 其他
+.cache
+wandb/
+runs/
+outputs/
+results/
