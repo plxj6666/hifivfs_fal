@@ -1,5 +1,7 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
 class ResBlock(nn.Module):
     def __init__(self, channels):
         super().__init__()
@@ -27,49 +29,57 @@ class SelfAttentionBlock(nn.Module):
         super().__init__()
         self.channels = channels
         self.num_heads = num_heads
-
-        # PyTorch 的 MultiheadAttention
-        # embed_dim 必须能被 num_heads 整除
+        
+        # 将token压缩成更小的尺寸
+        self.compress_ratio = 4  # 减少token数量
+        self.compress = nn.MaxPool2d(kernel_size=self.compress_ratio, stride=self.compress_ratio)
+        
+        # 使用压缩后的token进行注意力计算
         self.mha = nn.MultiheadAttention(embed_dim=channels, num_heads=num_heads, batch_first=True)
-        # 通常在 Attention 前后会加 Layer Normalization
         self.ln = nn.LayerNorm(channels)
-        # Feedforward network (optional but common)
+        
+        # 更轻量级的前向网络
         self.ff = nn.Sequential(
-            nn.Linear(channels, channels * 4),
+            nn.Linear(channels, channels),  # 减少中间隐藏层大小
             nn.ReLU(),
-            nn.Linear(channels * 4, channels)
+            nn.Linear(channels, channels)
         )
         self.ln2 = nn.LayerNorm(channels)
-
 
     def forward(self, x):
         # x 的形状: (B, C, H, W)
         B, C, H, W = x.shape
-        identity = x # 保存原始输入用于残差连接
+        identity = x  # 保存原始输入用于残差连接
 
-        # 1. Reshape for Attention: (B, C, H, W) -> (B, H*W, C)
-        # H*W 相当于序列长度
-        x_reshaped = x.view(B, C, H * W).permute(0, 2, 1) # (B, H*W, C)
+        # 1. 压缩序列长度 (空间池化)
+        x_small = self.compress(x)  # (B, C, H/4, W/4)
+        H_small, W_small = H // self.compress_ratio, W // self.compress_ratio
+        
+        # 2. 重塑压缩后的特征图
+        x_reshaped = x_small.view(B, C, H_small * W_small).permute(0, 2, 1)  # (B, H_small*W_small, C)
 
-        # 2. Layer Normalization
+        # 3. Layer Normalization
         x_norm = self.ln(x_reshaped)
 
-        # 3. Multi-Head Attention
-        # Q, K, V 都来自 x_norm
-        attn_output, _ = self.mha(x_norm, x_norm, x_norm) # Output: (B, H*W, C)
+        # 4. Multi-Head Attention (在压缩的序列上)
+        attn_output, _ = self.mha(x_norm, x_norm, x_norm)  # Output: (B, H_small*W_small, C)
 
-        # 4. Residual Connection 1
+        # 5. Residual Connection
         x_res1 = x_reshaped + attn_output
 
-        # 5. Feedforward Network part
+        # 6. Feedforward
         x_norm2 = self.ln2(x_res1)
         ff_output = self.ff(x_norm2)
+        x_res2 = x_res1 + ff_output  # (B, H_small*W_small, C)
 
-        # 6. Residual Connection 2
-        x_res2 = x_res1 + ff_output # (B, H*W, C)
-
-        # 7. Reshape back: (B, H*W, C) -> (B, C, H, W)
-        output = x_res2.permute(0, 2, 1).view(B, C, H, W)
+        # 7. 重塑回压缩的特征图
+        x_small_out = x_res2.permute(0, 2, 1).view(B, C, H_small, W_small)  # (B, C, H_small, W_small)
+        
+        # 8. 上采样回原始大小
+        x_upsampled = F.interpolate(x_small_out, size=(H, W), mode='bilinear', align_corners=False)
+        
+        # 9. 残差连接与原始输入
+        output = identity + x_upsampled
 
         return output
 

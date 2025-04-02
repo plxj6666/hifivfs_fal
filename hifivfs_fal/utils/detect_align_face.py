@@ -19,8 +19,8 @@ class MediapipeFaceAligner:
                  static_image_mode=True, # 处理静态图片还是视频流
                  max_num_faces=1,        # 最多检测人脸数量
                  refine_landmarks=True,  # 细化眼部和唇部关键点
-                 min_detection_confidence=0.5,
-                 min_tracking_confidence=0.5):
+                 min_detection_confidence=0.3,
+                 min_tracking_confidence=0.3):
         """初始化MediaPipe Face Mesh"""
         self.face_mesh = mp.solutions.face_mesh.FaceMesh(
             static_image_mode=static_image_mode,
@@ -205,6 +205,9 @@ def detect_align_face(frame_bgr, target_size=(112, 112), return_landmarks=False)
                aligned_face 如果return_landmarks=False
                如果没有检测或对齐失败，则返回(None, None)或None
     """
+    # 增加对比度和亮度
+    enhanced = cv2.convertScaleAbs(frame_bgr, alpha=1.2, beta=10)
+
     # 使用单例模式确保只创建一个实例
     if not hasattr(detect_align_face, "aligner_instance"):
         logger.info("Initializing MediaPipe Face Aligner...")
@@ -214,7 +217,11 @@ def detect_align_face(frame_bgr, target_size=(112, 112), return_landmarks=False)
     aligner = detect_align_face.aligner_instance
 
     # 执行对齐（内部会先做检测）
-    aligned_face = aligner.align_face_arcface(frame_bgr, target_size)
+    try:
+        aligned_face = aligner.align_face_arcface(enhanced, target_size)
+    except Exception as e:
+        logger.error(f"Face detection error: {e}")
+        return (None, None) if return_landmarks else None
 
     if aligned_face is None:
         return (None, None) if return_landmarks else None
@@ -222,7 +229,7 @@ def detect_align_face(frame_bgr, target_size=(112, 112), return_landmarks=False)
     if return_landmarks:
         # 如果需要返回关键点，需要再次检测或修改 align_face_arcface 返回关键点
         # 为了简单起见，我们再次检测（效率稍低）
-        img_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        img_rgb = cv2.cvtColor(enhanced, cv2.COLOR_BGR2RGB)
         all_landmarks_px = aligner.detect_landmarks(img_rgb)
         if all_landmarks_px is None:
              five_landmarks = None
