@@ -274,7 +274,7 @@ if __name__ == '__main__':
     # --- 加载示例图像 ---
     image_path1 = '/root/HiFiVFS/data/mayun1.jpg' # 替换为你自己的路径
     image_path2 = '/root/HiFiVFS/data/mayun1.jpg' # 替换为你自己的路径
-    image_path3 = '/root/HiFiVFS/data/test_image.jpg' # 替换为你自己的路径
+    image_path3 = '/root/HiFiVFS/samples/vox2_640/sample_epoch951_step9500.png' # 替换为你自己的路径
 
     img1 = cv2.imread(image_path1)
     img2 = cv2.imread(image_path2)
@@ -316,15 +316,15 @@ if __name__ == '__main__':
 
     # --- 测试直接对对齐人脸提取特征 ---
     logger.info("\n--- 测试对已对齐人脸提取特征 ---")
-    aligned_face1 = recognizer.detect_and_align(img1)
-    if aligned_face1 is not None:
+    aligned_face3 = recognizer.detect_and_align(img3)
+    if aligned_face3 is not None:
          logger.info("图像1 对齐成功，尝试直接提取特征...")
-         embedding1_direct = recognizer.get_embedding(aligned_face1)
-         if embedding1_direct is not None:
-              logger.info(f"直接从对齐人脸提取特征成功，维度: {embedding1_direct.shape}")
+         embedding3_direct = recognizer.get_embedding(aligned_face3)
+         if embedding3_direct is not None:
+              logger.info(f"直接从对齐人脸提取特征成功，维度: {embedding3_direct.shape}")
               if embedding1 is not None:
-                   diff = np.linalg.norm(embedding1 - embedding1_direct)
-                   sim_check = recognizer.compute_similarity(embedding1, embedding1_direct)
+                   diff = np.linalg.norm(embedding1 - embedding3_direct)
+                   sim_check = recognizer.compute_similarity(embedding3, embedding3_direct)
                    logger.info(f" extract_identity vs get_embedding(aligned) 差异 (L2范数): {diff:.6f}, 相似度: {sim_check:.6f}")
          else: logger.error("直接从对齐人脸提取特征失败。")
     else: logger.warning("图像1 对齐失败，跳过直接提取测试。")
