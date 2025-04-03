@@ -10,298 +10,327 @@ import os
 # 获取日志记录器
 logger = logging.getLogger(__name__)
 # 配置日志级别（如果尚未在别处配置）
-# logging.basicConfig(level=logging.INFO)
+# logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# --- MediaPipe Face Mesh Landmark Indices (for 468 landmarks) ---
+# 参考: https://github.com/google/mediapipe/blob/master/mediapipe/modules/face_geometry/data/canonical_face_model_uv_visualization.png
+# 这些索引通常比较稳定
+LMK_LEFT_EYE_OUTER_CORNER = 33
+LMK_LEFT_EYE_INNER_CORNER = 133 # Alternative: 246 ?
+LMK_RIGHT_EYE_OUTER_CORNER = 263
+LMK_RIGHT_EYE_INNER_CORNER = 362 # Alternative: 466 ?
+LMK_NOSE_TIP = 1
+LMK_MOUTH_LEFT_CORNER = 61
+LMK_MOUTH_RIGHT_CORNER = 291
+
+# 眼睛中心点（通过平均获得更稳定的估计）
+LMK_LEFT_EYE_CENTER_PTS = [33, 160, 158, 133, 153, 144] # 外角, 上中, 下中, 内角, 下缘, 上缘
+LMK_RIGHT_EYE_CENTER_PTS = [263, 387, 385, 362, 380, 373] # 外角, 上中, 下中, 内角, 下缘, 上缘
+
+# 眉毛点有时也用于对齐
+LMK_LEFT_EYEBROW_OUTER = 70
+LMK_RIGHT_EYEBROW_OUTER = 300
+
 
 class MediapipeFaceAligner:
     """使用MediaPipe Face Mesh进行人脸检测、关键点提取和对齐"""
 
     def __init__(self,
-                 static_image_mode=True, # 处理静态图片还是视频流
-                 max_num_faces=1,        # 最多检测人脸数量
-                 refine_landmarks=True,  # 细化眼部和唇部关键点
-                 min_detection_confidence=0.3,
-                 min_tracking_confidence=0.3):
+                 static_image_mode=True,
+                 max_num_faces=1,
+                 refine_landmarks=True, # 设为 True 可以获取虹膜点 (468-477)，但基础对齐通常不需要
+                 min_detection_confidence=0.4, # 稍微提高一点默认值，减少误检
+                 min_tracking_confidence=0.4):
         """初始化MediaPipe Face Mesh"""
-        self.face_mesh = mp.solutions.face_mesh.FaceMesh(
-            static_image_mode=static_image_mode,
-            max_num_faces=max_num_faces,
-            refine_landmarks=refine_landmarks,
-            min_detection_confidence=min_detection_confidence,
-            min_tracking_confidence=min_tracking_confidence
-        )
-        # 定义用于ArcFace对齐的MediaPipe关键点索引
-        # 这些索引需要根据MediaPipe Face Mesh的468/478点模型确定
-        # 这是一个常见的映射，但可能需要根据版本微调：
-        # 参考：https://github.com/google/mediapipe/issues/1615#issuecomment-752534379
-        # 或 https://github.com/serengil/retinaface/blob/master/retinaface/commons/align.py
-        # 索引可能基于0开始
-        self.ARCFAE_LMK_INDICES = {
-            "left_eye": 33,   # 左眼内角? (或者需要平均几个点?) 常见的可能是 133, 173, 157, 158, 159, 160, 161, 246
-            "right_eye": 263, # 右眼内角? (或者需要平均几个点?) 常见的可能是 362, 398, 384, 385, 386, 387, 388, 466
-            "nose": 1,      # 鼻尖
-            "mouth_left": 61, # 左嘴角
-            "mouth_right": 291 # 右嘴角
-        }
-        # 可能需要调整上述索引以获得最佳效果，或使用眼睛瞳孔点：
-        # Left eye pupil: 468, Right eye pupil: 473 (如果 refine_landmarks=True)
+        self.static_image_mode = static_image_mode
+        self.max_num_faces = max_num_faces
+        self.refine_landmarks = refine_landmarks
+        self.min_detection_confidence = min_detection_confidence
+        self.min_tracking_confidence = min_tracking_confidence
 
+        # 延迟初始化 face_mesh，避免在不需要时加载
+        self._face_mesh = None
+        logger.info(f"MediaPipeFaceAligner configured (will initialize on first use).")
+
+    def _initialize_mesh(self):
+        """Lazy initialization of FaceMesh."""
+        if self._face_mesh is None:
+            logger.info("Initializing MediaPipe Face Mesh...")
+            try:
+                self._face_mesh = mp.solutions.face_mesh.FaceMesh(
+                    static_image_mode=self.static_image_mode,
+                    max_num_faces=self.max_num_faces,
+                    refine_landmarks=self.refine_landmarks,
+                    min_detection_confidence=self.min_detection_confidence,
+                    min_tracking_confidence=self.min_tracking_confidence
+                )
+                logger.info("MediaPipe Face Mesh initialized successfully.")
+            except Exception as e:
+                logger.error(f"Failed to initialize MediaPipe Face Mesh: {e}", exc_info=True)
+                raise RuntimeError("Could not initialize MediaPipe Face Mesh") from e
+
+    @property
+    def face_mesh(self):
+        """Getter for the FaceMesh instance, initializes if needed."""
+        self._initialize_mesh()
+        return self._face_mesh
 
     def detect_landmarks(self, img_rgb: np.ndarray) -> list | None:
-        """检测图像中的人脸关键点"""
-        # 原始图像尺寸
+        """
+        检测图像中的人脸关键点 (返回第一个检测到的人脸的原始像素坐标)。
+        增加了对检测结果的检查。
+        """
+        if img_rgb is None or img_rgb.size == 0:
+            logger.warning("Input image is empty.")
+            return None
+
         original_h, original_w = img_rgb.shape[:2]
-        
-        # 检查图像是否过大，如果是则缩小
-        max_dim = 1024  # 最大尺寸阈值
-        scale_factor = 1.0
-        
-        if original_h > max_dim or original_w > max_dim:
-            scale_factor = min(max_dim / original_h, max_dim / original_w)
-            new_h, new_w = int(original_h * scale_factor), int(original_w * scale_factor)
-            img_rgb_resized = cv2.resize(img_rgb, (new_w, new_h))
-            logger.info(f"缩小图像进行检测: {original_h}x{original_w} -> {new_h}x{new_w}")
-            img_rgb_for_detection = img_rgb_resized
-        else:
-            img_rgb_for_detection = img_rgb
-        
-        # 在适当尺寸的图像上运行MediaPipe
-        results = self.face_mesh.process(img_rgb_for_detection)
-        if not results.multi_face_landmarks:
-            return None
+        logger.debug(f"Detecting landmarks on image of size: {original_w}x{original_h}")
 
-        # 只返回第一个检测到的人脸的关键点
-        face_landmarks = results.multi_face_landmarks[0]
-        landmarks = []
-        
-        # 检测后的图像尺寸
-        detect_h, detect_w = img_rgb_for_detection.shape[:2]
-        
-        for landmark in face_landmarks.landmark:
-            # 先获取相对于检测图像的像素坐标
-            px, py = landmark.x * detect_w, landmark.y * detect_h
-            
-            # 如果进行了缩放，将坐标映射回原始图像
-            if scale_factor != 1.0:
-                px, py = px / scale_factor, py / scale_factor
-                
-            landmarks.append((px, py))
-
-        if len(landmarks) != 468 and len(landmarks) != 478:
-            logger.warning(f"Expected 468 or 478 landmarks, but got {len(landmarks)}")
-            if not landmarks:
-                return None
-
-        return landmarks  # 返回原始图像尺寸下的坐标
-
-    def align_face_arcface(self, img_bgr: np.ndarray, target_size=(112, 112)) -> np.ndarray | None:
-        """
-        使用MediaPipe关键点进行ArcFace标准对齐
-
-        Args:
-            img_bgr (np.ndarray): BGR格式的输入图像
-            target_size (tuple): 目标输出尺寸 (高度, 宽度)
-
-        Returns:
-            np.ndarray | None: 对齐后的人脸图像 (BGR), 如果失败则返回None
-        """
-        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-        img_h, img_w = img_rgb.shape[:2]
-        all_landmarks_px = self.detect_landmarks(img_rgb)
-
-        if all_landmarks_px is None:
-            logger.warning("No landmarks detected by MediaPipe.")
-            return None
-
-        # --- 提取用于ArcFace对齐的5个关键点 ---
-        # !!! 这里的索引选择非常关键，需要仔细验证 !!!
-        # 使用像素坐标
         try:
-            # 使用之前定义的索引
-            # lm_left_eye = all_landmarks_px[self.ARCFAE_LMK_INDICES["left_eye"]]
-            # lm_right_eye = all_landmarks_px[self.ARCFAE_LMK_INDICES["right_eye"]]
-            # lm_nose = all_landmarks_px[self.ARCFAE_LMK_INDICES["nose"]]
-            # lm_mouth_left = all_landmarks_px[self.ARCFAE_LMK_INDICES["mouth_left"]]
-            # lm_mouth_right = all_landmarks_px[self.ARCFAE_LMK_INDICES["mouth_right"]]
+            # Process the image
+            results = self.face_mesh.process(img_rgb)
+        except Exception as e:
+            logger.error(f"MediaPipe face_mesh.process failed: {e}", exc_info=True)
+            return None
 
-            # 另一种常见的5点选择（需要验证索引的准确性！）
-            # 例如，基于 https://github.com/deepinsight/insightface/blob/master/python-package/insightface/utils/face_align.py 的思路但不直接用它的点
-            # 尝试取眼睛瞳孔（如果可用且准确）或眼睛中心
-            # 瞳孔点（如果 refine_landmarks=True）
-            if len(all_landmarks_px) > 468: # 假设 refine_landmarks=True 且返回了虹膜点
-                 left_eye_idx = 468 + 5 -1 # 左虹膜中心 approx
-                 right_eye_idx = 473 + 5 -1 # 右虹膜中心 approx
-                 lm_left_eye = all_landmarks_px[left_eye_idx]
-                 lm_right_eye = all_landmarks_px[right_eye_idx]
-            else: # 否则取眼睛的某个稳定点，例如眼角
-                lm_left_eye = all_landmarks_px[33] # 左眼内角?
-                lm_right_eye = all_landmarks_px[263]# 右眼内角?
+        if not results or not results.multi_face_landmarks:
+            logger.debug("No face landmarks detected by MediaPipe.")
+            return None
 
-            lm_nose = all_landmarks_px[1]      # 鼻尖
-            lm_mouth_left = all_landmarks_px[61] # 左嘴角
-            lm_mouth_right = all_landmarks_px[291]# 右嘴角
+        # 只处理第一个检测到的人脸
+        face_landmarks = results.multi_face_landmarks[0]
+        
+        # 检查landmark数量是否符合预期
+        num_landmarks = len(face_landmarks.landmark)
+        expected_min = 468
+        expected_max = 478 if self.refine_landmarks else 468
+        if not (expected_min <= num_landmarks <= expected_max):
+             logger.warning(f"Unexpected number of landmarks detected: {num_landmarks}. Expected between {expected_min} and {expected_max}.")
+             # 即使数量不对，也尝试继续，但可能下游会失败
+             # return None # 或者在这里直接失败
 
-            dst = np.array([
+        landmarks_px = []
+        for i, landmark in enumerate(face_landmarks.landmark):
+            # 检查 landmark 坐标是否有效
+            if not (0 <= landmark.x <= 1 and 0 <= landmark.y <= 1):
+                # logger.warning(f"Invalid relative coordinate for landmark {i}: ({landmark.x}, {landmark.y}). Skipping face.")
+                # return None # 如果坐标无效，可能整个检测结果都有问题
+                # 暂时只记录，并尝试使用裁剪后的值
+                px = np.clip(landmark.x * original_w, 0, original_w - 1)
+                py = np.clip(landmark.y * original_h, 0, original_h - 1)
+                logger.warning(f"Clipped invalid relative coordinate for landmark {i}: ({landmark.x}, {landmark.y}) -> ({px}, {py})")
+            else:
+                px = landmark.x * original_w
+                py = landmark.y * original_h
+            landmarks_px.append((px, py))
+
+        logger.debug(f"Detected {len(landmarks_px)} landmarks.")
+        return landmarks_px # 返回原始图像尺寸下的像素坐标列表 [(x1, y1), (x2, y2), ...]
+
+    def _get_stable_landmarks_for_alignment(self, all_landmarks_px: list) -> np.ndarray | None:
+        """
+        从所有关键点中提取用于对齐的5个稳定点。
+        使用平均策略提高稳定性。
+        """
+        if not all_landmarks_px or len(all_landmarks_px) < 468:
+             logger.warning(f"Not enough landmarks provided for stable extraction: {len(all_landmarks_px)}")
+             return None
+        
+        try:
+            # --- 策略1: 使用平均眼睛中心点 ---
+            left_eye_center = np.mean([all_landmarks_px[i] for i in LMK_LEFT_EYE_CENTER_PTS], axis=0)
+            right_eye_center = np.mean([all_landmarks_px[i] for i in LMK_RIGHT_EYE_CENTER_PTS], axis=0)
+            
+            # --- 策略2: 使用内外眼角 (可能选一组) ---
+            # lm_left_eye = all_landmarks_px[LMK_LEFT_EYE_INNER_CORNER]
+            # lm_right_eye = all_landmarks_px[LMK_RIGHT_EYE_INNER_CORNER]
+            # lm_left_eye = all_landmarks_px[LMK_LEFT_EYE_OUTER_CORNER]
+            # lm_right_eye = all_landmarks_px[LMK_RIGHT_EYE_OUTER_CORNER]
+
+            # 选择策略1 (平均中心点)
+            lm_left_eye = left_eye_center
+            lm_right_eye = right_eye_center
+
+            lm_nose = np.array(all_landmarks_px[LMK_NOSE_TIP])
+            lm_mouth_left = np.array(all_landmarks_px[LMK_MOUTH_LEFT_CORNER])
+            lm_mouth_right = np.array(all_landmarks_px[LMK_MOUTH_RIGHT_CORNER])
+
+            dst_points = np.array([
                 lm_left_eye, lm_right_eye, lm_nose, lm_mouth_left, lm_mouth_right
             ], dtype=np.float32)
+
+            # 检查是否有 NaN 或 Inf 值
+            if not np.all(np.isfinite(dst_points)):
+                logger.error("NaN or Inf found in selected landmark points.")
+                return None
+
+            return dst_points
 
         except IndexError as e:
             logger.error(f"Failed to get required landmarks using indices: {e}. Landmark count: {len(all_landmarks_px)}")
             return None
+        except Exception as e:
+            logger.error(f"Error during stable landmark extraction: {e}", exc_info=True)
+            return None
 
+    def align_face_arcface(self, img_bgr: np.ndarray, target_size=(112, 112)) -> np.ndarray | None:
+        """
+        使用MediaPipe关键点进行ArcFace标准对齐。
+        改进了关键点选择和错误处理。
 
-        # --- ArcFace 参考点 (与之前代码相同) ---
-        src = np.array([
-            [30.2946, 51.6963], [65.5318, 51.5014], [48.0252, 71.7366],
-            [33.5493, 92.3655], [62.7299, 92.2041]
+        Args:
+            img_bgr (np.ndarray): BGR格式的输入图像。
+            target_size (tuple): 目标输出尺寸 (高度, 宽度)。
+
+        Returns:
+            np.ndarray | None: 对齐后的人脸图像 (BGR), 如果失败则返回None。
+        """
+        if img_bgr is None or img_bgr.size == 0:
+            logger.warning("Input image for alignment is empty.")
+            return None
+
+        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+        img_h, img_w = img_rgb.shape[:2]
+
+        # 检测关键点
+        all_landmarks_px = self.detect_landmarks(img_rgb)
+        if all_landmarks_px is None:
+            logger.warning("Landmark detection failed, cannot align face.")
+            return None
+
+        # 提取用于对齐的5个稳定关键点
+        dst_landmarks = self._get_stable_landmarks_for_alignment(all_landmarks_px)
+        if dst_landmarks is None:
+            logger.warning("Failed to extract stable landmarks for alignment.")
+            return None
+        
+        logger.debug(f"Using landmarks for alignment: {dst_landmarks.tolist()}")
+
+        # --- ArcFace 标准参考点 (112x112 空间) ---
+        # 这些是广泛使用的参考点，确保它们与你的 Eid 模型训练时使用的对齐方式一致
+        src_ref_points = np.array([
+            [38.2946, 51.6963], [73.5318, 51.5014], [56.0252, 71.7366],
+            [41.5493, 92.3655], [70.7299, 92.2041]
         ], dtype=np.float32)
-
+        
         # 根据目标尺寸缩放参考点
-        src[:, 0] *= target_size[1] / 112.0
-        src[:, 1] *= target_size[0] / 112.0
+        target_h, target_w = target_size
+        src_scaled_points = src_ref_points.copy()
+        src_scaled_points[:, 0] *= target_w / 112.0
+        src_scaled_points[:, 1] *= target_h / 112.0
 
-        # 计算变换矩阵
+        # 计算仿射变换矩阵 (Similarity Transform)
+        # 使用 estimateAffinePartial2D 更适合估计相似变换（旋转、缩放、平移）
+        # 它返回一个 2x3 的矩阵 M
         try:
-             # 使用 estimateAffinePartial2D 可能更鲁棒
-            # M = cv2.estimateAffinePartial2D(dst, src, method=cv2.LMEDS)[0] # LMEDS 更鲁棒?
-             # 或者使用 getAffineTransform (如果只有3对点，但我们有5对，用 estimate更好)
-             # 考虑到 dst 可能因为检测误差不完全符合仿射变换，estimateAffinePartial2D 通常更好
-            tform = cv2.estimateAffinePartial2D(dst, src, method=cv2.RANSAC)[0]
-            if tform is None:
-                 logger.warning("Estimate Affine Transform failed.")
-                 # Fallback using estimateAffine2D?
-                 tform = cv2.estimateAffine2D(dst, src)[0]
-                 if tform is None:
-                     logger.error("Estimate Affine Transform failed completely.")
-                     return None
-            M = tform
+            # method=cv2.LMEDS 或 cv2.RANSAC 都可以增加鲁棒性
+            # RANSAC 通常对离群点更鲁棒
+            M, inliers = cv2.estimateAffinePartial2D(dst_landmarks, src_scaled_points, method=cv2.RANSAC, ransacReprojThreshold=5.0)
+
+            if M is None:
+                logger.warning("estimateAffinePartial2D failed (returned None). Trying estimateAffine2D as fallback.")
+                # Fallback: estimateAffine2D 估计完整的仿射变换，可能对非刚性形变更敏感
+                M, inliers = cv2.estimateAffine2D(dst_landmarks, src_scaled_points, method=cv2.RANSAC, ransacReprojThreshold=5.0)
+                if M is None:
+                    logger.error("Both estimateAffinePartial2D and estimateAffine2D failed.")
+                    return None
+            
+            num_inliers = np.sum(inliers)
+            logger.debug(f"Affine transform estimated with {num_inliers} inliers.")
+            if num_inliers < 3: # 如果内点太少，变换可能不可靠
+                 logger.warning(f"Transform estimation has only {num_inliers} inliers, result might be unstable.")
+                 # return None # 可以选择在这里失败
 
         except cv2.error as e:
-             logger.error(f"OpenCV error during Affine Transform estimation: {e}")
+             logger.error(f"OpenCV error during Affine Transform estimation: {e}", exc_info=True)
+             return None
+        except Exception as e:
+             logger.error(f"Unexpected error during Affine Transform estimation: {e}", exc_info=True)
              return None
 
+        logger.debug(f"Estimated Affine Matrix M:\n{M}")
 
-        # 应用变换
-        aligned_face = cv2.warpAffine(img_bgr, M, (target_size[1], target_size[0]), borderValue=0.0) # (width, height) for warpAffine size
-
+        # 应用仿射变换
+        # warpAffine 的 dsize 参数是 (宽度, 高度)
+        try:
+            aligned_face = cv2.warpAffine(img_bgr, M, (target_w, target_h), borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
+        except cv2.error as e:
+            logger.error(f"OpenCV error during warpAffine: {e}", exc_info=True)
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error during warpAffine: {e}", exc_info=True)
+            return None
+            
+        logger.info(f"Face aligned successfully to {target_w}x{target_h}.")
         return aligned_face
 
     def close(self):
         """关闭MediaPipe Face Mesh资源"""
-        self.face_mesh.close()
+        if self._face_mesh is not None:
+            logger.info("Closing MediaPipe Face Mesh...")
+            try:
+                self._face_mesh.close()
+                self._face_mesh = None
+                logger.info("MediaPipe Face Mesh closed.")
+            except Exception as e:
+                logger.error(f"Error closing MediaPipe Face Mesh: {e}", exc_info=True)
 
 
-# --- 便捷函数，现在使用 MediaPipe ---
-def detect_align_face(frame_bgr, target_size=(112, 112), return_landmarks=False):
+# --- 单例模式获取 Aligner ---
+_aligner_instance = None
+
+def get_mediapipe_face_aligner_instance(**kwargs):
     """
-    使用MediaPipe检测和对齐图像中的人脸（便捷函数）
+    获取单例的MediaPipe Face Aligner实例。
+    允许在第一次获取时传递初始化参数。
+    """
+    global _aligner_instance
+    if _aligner_instance is None:
+        logger.info("Creating global MediaPipeFaceAligner instance...")
+        # 可以从配置或参数传入 min_detection_confidence 等
+        conf = kwargs.get('min_detection_confidence', 0.4)
+        track_conf = kwargs.get('min_tracking_confidence', 0.4)
+        refine = kwargs.get('refine_landmarks', True)
+        static_mode = kwargs.get('static_image_mode', True)
+        max_faces = kwargs.get('max_num_faces', 1)
+
+        _aligner_instance = MediapipeFaceAligner(
+            static_image_mode=static_mode,
+            max_num_faces=max_faces,
+            refine_landmarks=refine,
+            min_detection_confidence=conf,
+            min_tracking_confidence=track_conf
+        )
+    return _aligner_instance
+
+
+# --- 简化的便捷函数 ---
+def detect_align_face(frame_bgr: np.ndarray, target_size=(112, 112)) -> np.ndarray | None:
+    """
+    使用全局 Aligner 实例进行人脸检测与对齐。
 
     Args:
-        frame_bgr (numpy.ndarray): BGR格式的输入图像
-        target_size (tuple): 目标输出尺寸 (高度, 宽度)
-        return_landmarks (bool): 是否同时返回所选的5个关键点
+        frame_bgr (np.ndarray): 输入 BGR 图像。
+        target_size (tuple): 目标对齐尺寸 (高度, 宽度)。
 
     Returns:
-        tuple: (aligned_face, five_landmarks) 如果return_landmarks=True
-               aligned_face 如果return_landmarks=False
-               如果没有检测或对齐失败，则返回(None, None)或None
+        np.ndarray | None: 对齐后的人脸图像 (BGR), 或 None 如果失败。
     """
-    # 增加对比度和亮度
-    enhanced = cv2.convertScaleAbs(frame_bgr, alpha=1.2, beta=10)
+    if frame_bgr is None or frame_bgr.size == 0:
+        logger.warning("detect_align_face received an empty frame.")
+        return None
 
-    # 使用单例模式确保只创建一个实例
-    if not hasattr(detect_align_face, "aligner_instance"):
-        logger.info("Initializing MediaPipe Face Aligner...")
-        detect_align_face.aligner_instance = MediapipeFaceAligner()
-        logger.info("MediaPipe Face Aligner initialized.")
+    # 获取（或创建）全局 aligner 实例
+    # 如果需要特定配置，可以在首次调用时传入参数
+    aligner = get_mediapipe_face_aligner_instance() 
 
-    aligner = detect_align_face.aligner_instance
-
-    # 执行对齐（内部会先做检测）
-    try:
-        aligned_face = aligner.align_face_arcface(enhanced, target_size)
-    except Exception as e:
-        logger.error(f"Face detection error: {e}")
-        return (None, None) if return_landmarks else None
+    # 直接调用对齐方法
+    aligned_face = aligner.align_face_arcface(frame_bgr, target_size=target_size)
 
     if aligned_face is None:
-        return (None, None) if return_landmarks else None
+        logger.warning("Face alignment failed for the input frame.")
+        return None
 
-    if return_landmarks:
-        # 如果需要返回关键点，需要再次检测或修改 align_face_arcface 返回关键点
-        # 为了简单起见，我们再次检测（效率稍低）
-        img_rgb = cv2.cvtColor(enhanced, cv2.COLOR_BGR2RGB)
-        all_landmarks_px = aligner.detect_landmarks(img_rgb)
-        if all_landmarks_px is None:
-             five_landmarks = None
-        else:
-             # 提取用于对齐的5个点（代码与 align_face_arcface 中一致）
-            try:
-                if len(all_landmarks_px) > 468:
-                    left_eye_idx, right_eye_idx = 468 + 5 -1, 473 + 5 -1
-                    lm_left_eye = all_landmarks_px[left_eye_idx]
-                    lm_right_eye = all_landmarks_px[right_eye_idx]
-                else:
-                    lm_left_eye = all_landmarks_px[33]
-                    lm_right_eye = all_landmarks_px[263]
-                lm_nose = all_landmarks_px[1]
-                lm_mouth_left = all_landmarks_px[61]
-                lm_mouth_right = all_landmarks_px[291]
-                five_landmarks = np.array([
-                    lm_left_eye, lm_right_eye, lm_nose, lm_mouth_left, lm_mouth_right
-                ], dtype=np.float32)
-            except IndexError:
-                five_landmarks = None
+    return aligned_face
 
-        return aligned_face, five_landmarks
-    else:
-        return aligned_face
-
-
-# --- Example Usage / Testing ---
-if __name__ == '__main__':
-    print("--- Testing MediaPipe Face Alignment ---")
-    # --- !!! CHANGE THIS to your test image path !!! ---
-    test_image_path = "/root/HiFiVFS/data/test_image.jpg"
-
-    if not os.path.exists(test_image_path):
-        print(f"ERROR: Test image not found at '{test_image_path}'")
-    else:
-        img = cv2.imread(test_image_path)
-        if img is None:
-            print(f"ERROR: Failed to load image '{test_image_path}'")
-        else:
-            print(f"Original image shape: {img.shape}")
-
-            # --- Test ArcFace Alignment ---
-            print("\nTesting ArcFace Alignment (112x112)...")
-            aligned_face_arc, landmarks = detect_align_face(img, target_size=(112, 112), return_landmarks=True)
-
-            if aligned_face_arc is not None:
-                print("ArcFace alignment successful.")
-                print(f"Aligned face shape: {aligned_face_arc.shape}")
-                cv2.imwrite("aligned_face_arcface.jpg", aligned_face_arc)
-                print("Saved aligned face to 'aligned_face_arcface.jpg'")
-                if landmarks is not None:
-                    print(f"Returned 5 landmarks shape: {landmarks.shape}")
-                    # Optional: Draw landmarks on original image for verification
-                    img_draw = img.copy()
-                    for (x, y) in landmarks.astype(int):
-                         cv2.circle(img_draw, (x, y), 2, (0, 255, 0), -1)
-                    cv2.imwrite("original_with_landmarks.jpg", img_draw)
-                    print("Saved original image with 5 landmarks to 'original_with_landmarks.jpg'")
-
-            else:
-                print("ArcFace alignment failed.")
-
-            # --- Optional: Test FFHQ-like Alignment (if needed) ---
-            # print("\nTesting FFHQ-like Alignment (256x256)...")
-            # aligned_face_ffhq = detect_align_face(img, target_size=(256, 256), mode='ffhq') # Need to implement 'ffhq' mode using mediapipe landmarks if desired
-            # if aligned_face_ffhq is not None:
-            #     print("FFHQ-like alignment successful.")
-            #     print(f"Aligned face shape: {aligned_face_ffhq.shape}")
-            #     cv2.imwrite("aligned_face_ffhq.jpg", aligned_face_ffhq)
-            #     print("Saved aligned face to 'aligned_face_ffhq.jpg'")
-            # else:
-            #     print("FFHQ-like alignment failed.")
-
-    print("\n--- MediaPipe Test Finished ---")

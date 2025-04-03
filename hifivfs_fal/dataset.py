@@ -88,21 +88,29 @@ class FALDataset(Dataset):
         return len(self.video_files)
 
     def _preprocess_face_for_recognition(self, frame_bgr: np.ndarray) -> np.ndarray | None:
-        """使用统一的人脸对齐方法处理人脸"""
-        # 直接使用face_recognizer中的detect_and_align方法，保持与提取特征时相同的对齐流程
-        aligned_face = self.face_recognizer.detect_and_align(frame_bgr)
+        """使用统一的人脸对齐方法处理人脸，返回识别器期望的格式 (假设是 BGR uint8)。"""
+        # detect_and_align 应该返回对齐后的 BGR uint8 图像
+        aligned_face_bgr_uint8 = self.face_recognizer.detect_and_align(frame_bgr) 
         
-        if aligned_face is None:
+        if aligned_face_bgr_uint8 is None:
+            logging.warning("Face alignment failed in _preprocess_face_for_recognition.")
             return None
         
-        # 确保图像在[-1,1]范围，这是许多神经网络的预期输入范围
-        if aligned_face.dtype == np.uint8:
-            normalized_face = (aligned_face.astype(np.float32) / 127.5) - 1.0
-        else:
-            # 如果已经是浮点类型，假设已经在0-1范围，转换到-1到1
-            normalized_face = (aligned_face * 2.0) - 1.0
-            
-        return normalized_face
+        # 确保返回的是 uint8
+        if aligned_face_bgr_uint8.dtype != np.uint8:
+            # 如果 detect_and_align 返回了其他类型，尝试转换
+            logging.warning(f"Aligner returned dtype {aligned_face_bgr_uint8.dtype}, attempting conversion to uint8.")
+            if np.issubdtype(aligned_face_bgr_uint8.dtype, np.floating):
+                # 假设是 0-1 或 -1 to 1 范围
+                if aligned_face_bgr_uint8.min() < 0: # Assume [-1, 1]
+                    aligned_face_bgr_uint8 = ((aligned_face_bgr_uint8 + 1.0) / 2.0 * 255.0).astype(np.uint8)
+                else: # Assume [0, 1]
+                    aligned_face_bgr_uint8 = (aligned_face_bgr_uint8 * 255.0).astype(np.uint8)
+            else:
+                logging.error("Aligner returned unexpected non-float, non-uint8 type. Cannot proceed.")
+                return None # Or raise error
+
+        return aligned_face_bgr_uint8 
 
     def _load_random_face_for_frid(self):
         """Loads a random face from a different video for frid."""
@@ -120,7 +128,7 @@ class FALDataset(Dataset):
                 preprocessed_face = self._preprocess_face_for_recognition(frame)
                 if preprocessed_face is not None:
                      # Need BGR for embedding model usually
-                     frid_embedding = self.face_recognizer.get_embedding(preprocessed_face if self.face_recognizer.model_name != 'buffalo_l' else cv2.cvtColor(preprocessed_face, cv2.COLOR_RGB2BGR) ) # Adjust based on recognizer input needs
+                     frid_embedding = self.face_recognizer.get_embedding(preprocessed_face) # Adjust based on recognizer input needs
                      if frid_embedding is not None:
                          return frid_embedding
             # Retry if failed
@@ -231,7 +239,7 @@ class FALDataset(Dataset):
             return self.__getitem__(random.randint(0, len(self)-1)) # Retry
 
         # Insightface app.get expects BGR uint8 usually
-        fgid = self.face_recognizer.get_embedding( ( (preprocessed_face_fgid + 1.0) * 127.5 ).astype(np.uint8) ) # Convert back for insightface app
+        fgid = self.face_recognizer.get_embedding(preprocessed_face_fgid)
         if fgid is None:
             logging.warning(f"Could not extract fgid from {video_path}. Retrying.")
             return self.__getitem__(random.randint(0, len(self)-1)) # Retry
@@ -251,22 +259,6 @@ class FALDataset(Dataset):
                  return self.__getitem__(random.randint(0, len(self)-1)) # Retry
             frid = torch.from_numpy(frid_numpy).float()
             is_same_identity = torch.tensor(False)
-
-
-        # --- Prepare f_rid for Decoder (Placeholder - needs decision) ---
-        # Option 1: Repeat fgid/frid (B, EmbedDim) -> (B, SeqLen, EmbedDim)
-        # Option 2: Project fgid/frid to (B, 1, kv_channels)
-        # For now, just return the raw 512-dim vector. Handling will be in training loop or model.
-        # --- Decide on Vt format ---
-        # If Vt is (N, C, H, W), how to handle batching?
-        # Option A: Return the sequence, collate_fn handles stacking into (B, N, C, H, W)
-        # Option B: Treat N as batch dim for now? (B=N, C, H, W). Simpler start. Let's use B.
-        if not self.use_vae_latent:
-             # If pixel space, vt is (N, 3, H, W). Assume N is batch for simplicity now.
-             pass # vt already (N, 3, H, W)
-        else:
-             # If latent space, vt is (N, 4, H_lat, W_lat). Assume N is batch.
-             pass # vt already (N, 4, H_lat, W_lat)
 
         # Ensure fgid and frid match batch size N
         fgid = fgid.unsqueeze(0).repeat(self.num_frames, 1) # (N, 512)

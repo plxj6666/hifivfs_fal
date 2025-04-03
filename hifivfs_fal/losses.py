@@ -113,7 +113,7 @@ def compute_triplet_identity_loss(fgid: torch.Tensor,
     loss_per_sample = F.relu(cos_orig_recon - cos_orig_input + margin) # relu implements max(0, x)
 
     # Create mask for samples where frid != fgid
-    mask = (~is_same_identity.squeeze()).float() # Negate and convert boolean to float (1.0 or 0.0)
+    mask = (~is_same_identity.squeeze()).to(fgid.device).float() # Negate and convert boolean to float (1.0 or 0.0)
 
     # Apply the mask
     masked_loss_per_sample = loss_per_sample * mask

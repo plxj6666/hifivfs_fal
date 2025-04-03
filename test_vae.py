@@ -16,7 +16,7 @@ vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse").to("cuda")
 vae_scale_factor = 0.18215
 
 # 载入测试图像
-test_image_path = "/root/HiFiVFS/data/VOX2/dev/id00012/21Uxsk56VDQ/00001.mp4"
+test_image_path = "/root/HiFiVFS/data/curated/00110.mp4"
 print(f"加载测试视频第一帧: {test_image_path}")
 cap = cv2.VideoCapture(test_image_path)
 ret, frame = cap.read()
