@@ -17,6 +17,7 @@ from pathlib import Path
 import time
 import numpy as np
 import traceback # 导入 traceback
+from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
 
 # 尝试导入 torchvision
 try:
@@ -231,7 +232,7 @@ def train_fal():
             
             save_interval = config['training']['save_interval']
             log_interval = config['training']['log_interval'] # TensorBoard 记录间隔
-            sample_save_interval = config['training'].get('sample_save_interval', 500) 
+            sample_save_interval = config['training'].get('sample_save_interval', 100) 
             clip_grad_norm = config['training'].get('clip_grad_norm', None) # 可选的梯度裁剪范数
         except KeyError as e:
              logger.error(f"配置文件中缺少必要的训练参数: {e}")
@@ -282,6 +283,15 @@ def train_fal():
         except Exception as e:
              logger.error(f"初始化优化器失败: {e}", exc_info=True)
              if writer: writer.close(); return
+
+        # --- 学习率调度器 ---
+        try:
+            scheduler_g = CosineAnnealingLR(optimizer_g, T_max=num_epochs, eta_min=learning_rate*0.01)
+            scheduler_d = CosineAnnealingLR(optimizer_d, T_max=num_epochs, eta_min=learning_rate*0.01)
+            logger.info("学习率调度器初始化完成。")
+        except Exception as e:
+            logger.error(f"初始化学习率调度器失败: {e}", exc_info=True)
+            if writer: writer.close(); return
 
         # --- 加载检查点 ---
         start_epoch = 0
@@ -447,21 +457,36 @@ def train_fal():
                         # 重建损失
                         rec_loss = losses.compute_reconstruction_loss(vt_latent_merged, vt_prime_latent_merged_g, is_same_identity_merged, loss_type='l1')
                         
-                        # 身份损失
+                        # **** 修改：调用 extract_gid_from_latent 时传递 global_step ****
                         try:
-                            # **** 注意：此操作非常耗时 ****
-                            f_gid_prime_merged_cpu = extract_gid_from_latent(vae, vt_prime_latent_merged_g, vae_scale_factor, face_recognizer)
+                            f_gid_prime_merged_cpu = extract_gid_from_latent(
+                                vae, vt_prime_latent_merged_g, vae_scale_factor, 
+                                face_recognizer, 
+                                global_step=global_step # 传递 global_step
+                            )
                             if f_gid_prime_merged_cpu is None:
-                                 logger.debug(f"步骤 {global_step}: extract_gid_from_latent 返回 None，Ltid 设为 0。")
-                                 tid_loss = torch.tensor(0.0, device=device, dtype=torch.float32)
+                                # 这个分支理论上不会被触发了，因为 extract_gid_from_latent 现在总是返回 Tensor
+                                logger.error(f"步骤 {global_step}: extract_gid_from_latent 返回 None，这是异常情况！")
+                                tid_loss = torch.tensor(0.0, device=device, dtype=torch.float32)
                             else:
-                                 f_gid_prime_merged = f_gid_prime_merged_cpu.to(device)
-                                 tid_loss = losses.compute_triplet_identity_loss(fgid_merged, f_gid_prime_merged, frid_merged, is_same_identity_merged.to(device), margin=loss_weights.get('identity_margin', 0.5)) # 从配置读取 margin
+                                # 检查返回的 Tensor 是否包含 NaN 或 Inf (虽然不太可能)
+                                if not torch.all(torch.isfinite(f_gid_prime_merged_cpu)):
+                                    logger.warning(f"步骤 {global_step}: extract_gid_from_latent 返回的 Tensor 包含 NaN 或 Inf！跳过 Ltid 计算。")
+                                    tid_loss = torch.tensor(0.0, device=device, dtype=torch.float32)
+                                else:
+                                    f_gid_prime_merged = f_gid_prime_merged_cpu.to(device)
+                                    # 检查是否全零（表示提取失败）
+                                    if torch.all(f_gid_prime_merged == 0):
+                                        logger.debug(f"步骤 {global_step}: 提取的 f_gid_prime 全零，Ltid 将为 0 或基于零向量计算。")
+                                    tid_loss = losses.compute_triplet_identity_loss(
+                                        fgid_merged, f_gid_prime_merged, frid_merged,
+                                        is_same_identity_merged.to(device), 
+                                        margin=loss_weights.get('identity_margin', 0.5)
+                                    )
                         except Exception as e:
                             logger.warning(f"步骤 {global_step}: 计算身份损失失败: {e}", exc_info=True)
-                            tid_loss = torch.tensor(0.0, device=device, dtype=torch.float32)
-                            
-                        # 总损失
+                            tid_loss = torch.tensor(0.0, device=device, dtype=torch.float32) 
+                            # 总损失
                         g_total_loss = losses.compute_G_total_loss(g_adv_loss, attr_loss, rec_loss, tid_loss, lambda_adv, lambda_attr, lambda_rec, lambda_tid)
                         
                     scaler.scale(g_total_loss).backward()
@@ -544,6 +569,10 @@ def train_fal():
             writer.add_scalar('Loss_Epoch/Attribute', avg_attr_loss, epoch + 1)
             writer.add_scalar('Loss_Epoch/Reconstruction', avg_rec_loss, epoch + 1)
             writer.add_scalar('Loss_Epoch/Identity_Triplet', avg_tid_loss, epoch + 1)
+
+            # --- 更新学习率调度器 ---
+            scheduler_g.step()
+            scheduler_d.step()
 
             # --- 保存检查点 ---
             if (epoch + 1) % save_interval == 0 or (epoch + 1) == num_epochs: # 每隔 interval 或最后一轮保存

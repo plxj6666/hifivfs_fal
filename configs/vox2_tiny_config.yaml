@@ -11,15 +11,15 @@ model:
 
 training:
   batch_size: 1
-  num_epochs: 100
-  learning_rate: 0.00002
+  num_epochs: 2001
+  learning_rate: 0.00001
   beta1: 0.5
   beta2: 0.999
   
   loss_weights:
     reconstruction: 10.0
     attribute: 10.0
-    identity: 0.5  # 降低身份损失权重
+    identity: 5  # 降低身份损失权重
     adversarial: 1.0
     
   save_interval: 1
