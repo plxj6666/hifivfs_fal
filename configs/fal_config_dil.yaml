@@ -1,0 +1,84 @@
+# config/fal_config_dil.yaml (建议另存为新文件或备份原文件)
+
+data:
+  train_list: "/root/HiFiVFS/data/vox2_curated_train.txt" # 确认这是你的小批量或完整训练列表
+  vae_latent: true
+  image_size_for_vae: [640, 640] 
+  # target_img_size 不再是必须的，因为对齐在 face_recognizer 中处理
+  # target_img_size: [112, 112] # 可以保留或移除，确保 face_recognizer.detect_and_align 使用正确尺寸
+  num_frames: 2 # 保持或根据需要增加
+
+# **** 新增/修改：模型相关配置 ****
+model:
+  # Encoder 参数 (如果你的 Encoder 类支持参数)
+  # encoder_params: 
+  #   channels: [..., ...] 
+  #   ...
+
+  # Decoder 参数
+  decoder_params:
+    # **** 必须：指定交叉注意力的维度 ****
+    # 这个值需要与 DIT 的 output_embedding_dim 和 FridProjector 的 output_dim 匹配
+    cross_attention_dim: 768 # 示例值，根据你的 UNet/Decoder 调整 (例如 768 或 1024)
+    # **** 必须：指定 tdid token 的数量 ****
+    num_tdid_tokens: 9 # 3x3 fdid 特征图 -> 9 tokens
+    # 其他 Decoder 可能需要的参数...
+    # frid_channels: 1280 # 不再需要，由 cross_attention_dim 决定
+
+  # Discriminator 参数 (如果支持)
+  # discriminator_params:
+  #   input_channels: 4
+  #   ...
+
+  # **** 新增：DIT 参数 ****
+  dit_params:
+    # input_channels 会在代码中动态获取，这里指定输出维度
+    output_embedding_dim: 768 # **** 必须与 decoder_params.cross_attention_dim 匹配 ****
+    # feature_map_size 会在代码中动态获取
+
+  # **** 新增：FridProjector 参数 ****
+  frid_projector_params:
+    # input_dim 会在代码中动态获取 (face_recognizer.embedding_size)
+    output_dim: 768 # **** 必须与 decoder_params.cross_attention_dim 匹配 ****
+    # hidden_dim: 1024 # (可选) 如果使用多层 MLP projector
+
+  # **** 新增：人脸识别模型配置 ****
+  face_recognition:
+    model_name: "Facenet512"
+    # fdid_layer_name: 'add_20' # (可选) 如果你想覆盖自动查找
+
+  # **** 新增：VAE 配置 ****
+  vae:
+    model_name: "stabilityai/sd-vae-ft-mse"
+    scale_factor: 0.18215
+
+training:
+  batch_size: 1 # 保持小批量或根据显存增加
+  num_epochs: 100 # 或者你想要的总轮数
+  learning_rate: 0.00001 # **** 建议降低学习率 **** (例如 1e-5 或 5e-6)
+  beta1: 0.5
+  beta2: 0.999
+  use_amp: true # 启用混合精度
+  clip_grad_norm: 1.0 # **** 建议启用梯度裁剪 **** (可选)
+  
+  loss_weights:
+    reconstruction: 1.0   # **** 保持较低值 ****
+    attribute: 10.0     # 保持或根据效果调整
+    identity: 10.0      # **** 保持较高值 **** (Ltid 的权重)
+    identity_lid: 1.0   # **** 添加 Lid 的权重 **** (可以从 1.0, 5.0 开始尝试)
+    adversarial: 1.0      # 保持或根据效果调整
+    identity_margin: 0.5  # Ltid 的 margin
+    
+  save_interval: 100 # **** 调整保存频率 **** (例如每 50 或 100 轮保存一次)
+  log_interval: 10   # **** TensorBoard 记录频率 (步数) ****
+  sample_save_interval: 100 # **** 保存图片样本频率 (步数) ****
+  
+  checkpoint_dir: "/root/HiFiVFS/checkpoints/fal_dil_vox2_640" # **** 建议使用新目录 ****
+  sample_dir: "/root/HiFiVFS/samples/fal_dil_vox2_640"       # **** 建议使用新目录 ****
+
+# **** 新增：DataLoader 配置 ****
+dataloader:
+  shuffle: true
+  num_workers: 0 # **** 建议增加 num_workers 加速数据加载 ****
+  pin_memory: true # **** 在 GPU 训练时设为 True 通常更好 ****
+  drop_last: true
