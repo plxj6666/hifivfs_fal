@@ -1,0 +1,84 @@
+# config/fal_config_dil_train_fal.yaml (重命名以明确用途)
+
+data:
+  train_list: "/root/HiFiVFS/data/vox2_curated_train.txt" # 确认路径
+  vae_latent: true # 推荐保持 true，直接在 latent space 操作
+  image_size_for_vae: [640, 640] # 与训练使用的 VAE 匹配
+  # target_img_size 不再是必须的，如果 _preprocess_face_for_recognition 内部有固定尺寸
+  num_frames: 2 # 对于 FAL 训练，2 帧可能足够，可以根据显存增加
+
+model:
+  # --- VAE (用于数据加载) ---
+  vae:
+    model_name: "stabilityai/sd-vae-ft-mse" # 保持与 SVD 使用的 VAE 一致
+    scale_factor: 0.18215
+
+  # --- 人脸识别 (用于数据加载和损失计算) ---
+  face_recognition:
+    model_name: "Facenet512" # 或其他模型，如 IRSE50
+    # fdid_layer_name: 'block8_1_add' # (可选) 指定提取 fdid 的层名，否则自动查找
+
+  # --- FAL Encoder (AttributeEncoder) ---
+  encoder_params: {} # 如果 AttributeEncoder 不需要配置参数，留空
+    # --- 注意：AttributeEncoder 的通道数和结构是固定的，不需要在这里配置 ---
+
+  # --- FAL Decoder ---
+  decoder_params:
+    # Decoder 的输入通道数需要与 Encoder 输出的 f_attr 通道数匹配 (1280)
+    # 需要添加 Decoder 自身参数，例如:
+    # input_channels: 1280 # f_attr 的通道数
+    # output_channels: 4 # VAE latent 的通道数
+    # channel_mult: [1, 2, 4] # 示例：Decoder 内部的上采样通道倍数
+    # num_res_blocks: 2     # 示例：每个分辨率的残差块数量
+    # attention_resolutions: [1] # 示例：在哪些分辨率使用注意力 (相对于 Decoder 输入)
+    # ... 其他 Decoder 架构参数 ...
+
+    # 以下是接收 Context 的参数
+    cross_attention_dim: 768 # **必须设置**，匹配 DIT 和 FridProjector 输出
+    num_tdid_tokens: 9       # **必须设置**，3x3 fdid -> 9 tokens
+
+  # --- Discriminator ---
+  discriminator_params: {} # 如果 Discriminator 不需要配置参数，留空
+    # input_channels: 4 # VAE latent 通道数
+    # ... 其他 Discriminator 参数 ...
+
+  # --- DIT (DetailedIdentityTokenizer) ---
+  dit_params:
+    # input_channels: 会动态获取
+    output_embedding_dim: 768 # **必须匹配** decoder_params.cross_attention_dim
+
+  # --- FridProjector ---
+  frid_projector_params:
+    # input_dim: 会动态获取
+    output_dim: 768 # **必须匹配** decoder_params.cross_attention_dim
+    # hidden_dim: 1024 # (可选) 如果你的 Projector 是多层的
+
+training:
+  batch_size: 1 # 根据显存调整，如果显存允许，可以增大 (例如 2, 4)
+  num_epochs: 100
+  learning_rate: 1e-5 # 1e-5 或 2e-5 是常见的起始值
+  beta1: 0.5
+  beta2: 0.999
+  use_amp: true
+  clip_grad_norm: 1.0 # 推荐启用
+
+  loss_weights:
+    reconstruction: 1.0 # L1 或 L2 重建损失，权重可以调整
+    attribute: 10.0    # 属性一致性损失，权重较高
+    identity: 10.0     # Ltid 身份三元组损失，权重较高
+    identity_lid: 5.0  # Lid 全局身份损失，权重可以设高一些 (例如 5.0 或 10.0)
+    adversarial: 1.0   # 对抗损失，权重可以根据需要调整
+    identity_margin: 0.5 # Ltid 的 margin
+
+  save_interval: 10 # 可以每 10 或 20 轮保存一次
+  log_interval: 100 # 每 100 步记录一次 TensorBoard
+  sample_save_interval: 500 # 每 500 步保存一次图片样本
+
+  checkpoint_dir: "/root/HiFiVFS/checkpoints/fal_module_train_640" # 明确这是 FAL 模块的检查点
+  sample_dir: "/root/HiFiVFS/samples/fal_module_train_640"      # 明确这是 FAL 模块的样本
+
+dataloader:
+  shuffle: true
+  num_workers: 4 # 根据你的 CPU 核心数和系统调整，>0 可以加速
+  pin_memory: true # 在 GPU 训练时推荐
+  drop_last: true

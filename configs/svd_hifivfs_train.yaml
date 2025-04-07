@@ -1,0 +1,213 @@
+# config/svd_hifivfs_train.yaml
+# 配置用于训练集成了 HiFiVFS (FAL+DIL) 的 SVD 模型
+
+# --- 数据加载配置 ---
+data:
+  target: fal_dil.dataset.FALDataset # 使用我们修改后的 Dataset
+  params:
+    video_list_file: "/root/HiFiVFS/data/vox2_curated_train.txt" # 你的训练数据列表
+    num_frames: 16 # SVD 通常处理稍长序列，例如 14 或 16 帧
+    use_vae_latent: true # 必须为 true，因为 DiffusionEngine 操作 latent
+    image_size_for_vae: [640, 640] # 必须与下面 first_stage_config 使用的 VAE 匹配
+    # face_recognizer 和 vae 实例会在主脚本中创建并传递，这里不需要 model_name
+    # target_img_size: [112, 112] # 用于对齐源图像
+    # fdid_shape: [1792, 3, 3] # 会在主脚本中动态获取
+
+dataloader:
+  batch_size: 1 # SVD 通常需要较小 batch size，根据显存调整 (1 或 2)
+  num_workers: 4 # 根据 CPU 调整
+  shuffle: true
+  pin_memory: true
+  drop_last: true
+
+# --- Pytorch Lightning Trainer 配置 ---
+lightning:
+  trainer:
+    # gpus: [0] # 指定使用的 GPU (如果需要)
+    accelerator: "gpu" # 或 "cpu"
+    devices: 1 # 或你使用的 GPU 数量
+    precision: 16 # 使用混合精度 (bf16 或 16)
+    max_epochs: 50 # 总训练轮数 (示例)
+    accumulate_grad_batches: 4 # 梯度累积 (示例，根据 batch_size 和显存调整)
+    gradient_clip_val: 1.0 # 梯度裁剪值 (匹配 training.clip_grad_norm)
+    log_every_n_steps: 10 # 日志记录频率 (步数)
+    val_check_interval: 1000 # (可选) 验证频率 (步数)
+    limit_val_batches: 100 # (可选) 限制验证批次数
+    # ... 其他 Pytorch Lightning Trainer 参数 ...
+
+  # --- 模型检查点配置 ---
+  modelcheckpoint:
+    params:
+      dirpath: "/root/HiFiVFS/checkpoints/svd_hifivfs_train_640" # SVD 模型的检查点目录
+      filename: "epoch_{epoch:03d}-step_{step:06d}"
+      save_top_k: 3 # 保存最好的 3 个检查点 (基于某个监控指标)
+      monitor: "loss" # 监控总损失 (或其他指标如 'loss_lid')
+      mode: "min"
+      save_last: true # 总是保存最后一个检查点
+
+# --- 核心模型配置 (传递给 DiffusionEngine) ---
+model:
+  target: svd.sgm.models.diffusion.DiffusionEngine # 指向我们修改后的 DiffusionEngine
+  params:
+    input_key: "vt" # DiffusionEngine 从 batch 中获取 VAE latent 的键
+
+    # --- SVD U-Net 网络配置 ---
+    network_config:
+      target: svd.sgm.modules.diffusionmodules.video_model.VideoUNet # 或 SpatialUNetModelWithTime
+      params:
+        in_channels: 4 # VAE latent channels
+        out_channels: 4
+        model_channels: 320 # SVD 基础通道数 (示例)
+        attention_resolutions: [4, 2, 1] # 在哪些下采样级别使用注意力 (示例)
+        num_res_blocks: 2 # 每个级别的残差块数 (示例)
+        channel_mult: [1, 2, 4, 4] # 通道倍增器 (示例)
+        num_heads: 8 # 注意力头数 (示例)
+        # num_head_channels: 64 # 或者指定每个头的通道数
+        # use_spatial_transformer: true # SVD 通常使用 Spatial Transformer
+        transformer_depth: 1 # 每个级别 Transformer 块的深度 (示例)
+        context_dim: 768 # **非常重要**: U-Net Cross-Attention 的维度
+                         # 必须与 DILEmbedder/AttributeEmbedder 输出维度匹配
+        use_checkpoint: true # 启用 checkpointing 节省显存
+        # legacy: false
+        # --- VideoUNet 特定参数 (示例) ---
+        # num_video_frames: 16 # 需要与 data.num_frames 匹配
+        video_kernel_size: 3 # 3D 卷积核大小
+        # ... 其他 VideoUNet 参数 ...
+
+    # --- Denoiser 配置 ---
+    denoiser_config:
+      target: svd.sgm.modules.diffusionmodules.denoiser.Denoiser # 或 DiscreteDenoiser
+      params:
+        scaling_config:
+          target: svd.sgm.modules.diffusionmodules.denoiser_scaling.EDMScaling # SVD/EDM 常用的缩放
+          # params: {} # EDMScaling 可能不需要额外参数
+
+    # --- VAE (First Stage) 配置 ---
+    first_stage_config:
+      target: svd.sgm.models.autoencoder.AutoencoderKL # 或 VideoAutoencoderKL
+      params:
+        embed_dim: 4
+        monitor: "val/rec_loss" # (可选) 监控指标
+        ddconfig: # VAE Encoder/Decoder 结构配置 (示例，需要匹配你使用的 VAE)
+          double_z: true
+          z_channels: 4
+          resolution: 256 # VAE 输入分辨率的一半? 需要确认
+          in_channels: 3
+          out_ch: 3
+          ch: 128
+          ch_mult: [1, 2, 4, 4]
+          num_res_blocks: 2
+          attn_resolutions: []
+          dropout: 0.0
+        lossconfig: # VAE 损失配置 (虽然在 SVD 训练中不直接用)
+          target: torch.nn.Identity # 可以设为 Identity
+
+    # --- Conditioner 配置 (包含 HiFiVFS Embedders) ---
+    conditioner_config:
+      target: svd.sgm.modules.encoders.modules.GeneralConditioner
+      params:
+        emb_models:
+          # 1. DIL Embedder
+          - target: fal_dil.models.embedders.DILEmbedder
+            params:
+              # face_recognizer 和 dit 实例会在主脚本中创建并注入
+              input_key: "source_image" # 来自 Dataset
+              output_key: "crossattn"   # 输出到 context['crossattn']
+
+          # 2. Attribute Embedder (f_attr)
+          - target: fal_dil.models.embedders.AttributeEmbedder
+            is_trainable: true # Attribute Encoder 需要训练
+            params:
+              # attribute_encoder 实例会在主脚本中创建并注入
+              unet_cross_attn_dim: 768 # **必须匹配** network_config.context_dim
+              input_key: "vt" # 来自 Dataset (VAE latent)
+              output_key: "f_attr_tokens" # 输出到 context['f_attr_tokens']
+
+          # --- (可选) SVD 可能需要的其他条件，例如 FPS ---
+          # - target: sgm.modules.encoders.modules.ConcatTimestepEmbedderND
+          #   params:
+          #     outdim: 256 # 示例维度
+          #   input_key: "fps_id" # 需要 Dataset 提供 fps_id
+          #   output_key: "vector" # 输出到 context['vector']
+
+          # --- (可选) SVD 可能需要的图像条件 (如果不是纯视频到视频) ---
+          # - target: sgm.modules.encoders.modules.FrozenOpenCLIPImageEmbedder
+          #   params:
+          #     # ... OpenCLIP Image Encoder 参数 ...
+          #   input_key: "image_cond" # 需要 Dataset 提供 image_cond
+          #   output_key: "crossattn" # 会和 DIL 的输出拼接
+
+    # --- 核心 LDM 损失函数配置 ---
+    loss_fn_config:
+      target: svd.sgm.modules.diffusionmodules.loss.StandardDiffusionLoss
+      params:
+        loss_type: "l2" # 或 l1
+        loss_weighting_config:
+          target: svd.sgm.modules.diffusionmodules.loss_weighting.MinSNRLossWeighting # 或其他加权策略
+          params:
+            snr_gamma: 5.0 # MinSNR 论文推荐值
+        sigma_sampler_config:
+          target: svd.sgm.modules.diffusionmodules.sigma_sampling.EDMSampling # EDM 对应的采样器
+          # params: {} # 可能不需要参数
+
+    # --- Sampler 配置 (用于推理，训练时可选) ---
+    sampler_config:
+      target: svd.sgm.modules.diffusionmodules.sampling.EulerEDMSampler # 或其他 EDM Sampler
+      params:
+        num_steps: 40 # 采样步数 (示例)
+        discretization_config:
+          target: svd.sgm.modules.diffusionmodules.discretizer.EDMDiscretization
+        guider_config:
+          target: svd.sgm.modules.diffusionmodules.guiders.VanillaCFG
+          params:
+            scale: 5.0 # CFG scale (示例)
+
+    # --- 优化器配置 ---
+    optimizer_config:
+      target: torch.optim.AdamW
+      params:
+        # learning_rate 会由 Pytorch Lightning 设置
+        weight_decay: 1e-2 # (可选) 权重衰减
+        betas: [0.9, 0.999] # (可以调整)
+
+    # --- 学习率调度器配置 ---
+    scheduler_config:
+      target: svd.sgm.lr_scheduler.LambdaLinearScheduler # SVD 常用的调度器
+      params:
+        warm_up_steps: [1000] # 预热步数 (示例)
+        cycle_lengths: [10000000000000] # 循环长度 (设为很大值表示不循环)
+        f_start: [1e-06] # 起始学习率因子
+        f_max: [1.0] # 最大学习率因子
+        f_min: [1.0] # 最小学习率因子
+
+    # --- EMA 配置 ---
+    use_ema: true
+    ema_decay_rate: 0.9999
+
+    # --- VAE 相关 ---
+    scale_factor: 0.18215 # 与 vae 配置匹配
+    disable_first_stage_autocast: false
+
+    # --- HiFiVFS 损失配置 (传递给 DiffusionEngine) ---
+    hifivfs_loss_config:
+      lambda_lid: 5.0 # Lid 损失权重 (示例)
+      lambda_fal: 1.0 # LFAL 总损失权重 (示例)
+      fal_weights: # LFAL 内部各分量的权重
+        attribute: 10.0
+        reconstruction: 1.0
+        identity: 10.0 # Ltid 权重
+        identity_margin: 0.5 # Ltid margin
+
+    # --- f_low 注入开关 (传递给 DiffusionEngine) ---
+    f_low_injection: true
+
+    # --- Face Recognizer (传递给 DiffusionEngine) ---
+    face_recognizer_config:
+       target: fal_dil.utils.face_recognition.DeepFaceRecognizer
+       params:
+          model_name: "Facenet512" # 必须与 Dataset 使用的模型一致
+
+    # --- Attribute Encoder (传递给 DiffusionEngine) ---
+    attribute_encoder_config:
+       target: fal_dil.models.encoder.AttributeEncoder
+       params: {} # 如果 Encoder 不需要参数

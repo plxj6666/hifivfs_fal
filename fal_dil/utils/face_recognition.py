@@ -29,7 +29,7 @@ except ImportError:
 
 # 内部依赖
 try:
-    from hifivfs_fal.utils.detect_align_face import detect_align_face 
+    from fal_dil.utils.detect_align_face import detect_align_face 
 except ImportError:
     # 尝试相对导入，以防在 utils 目录内运行
     try:
@@ -116,8 +116,8 @@ class DeepFaceRecognizer:
             target_layer = None
             # **** 更新 potential_layer_names - 基于你的模型摘要 ****
             potential_layer_names = [
-                 'add_20',              # 最后一个 Add 层 (Block8_6 输出) - 优先尝试
-                 'Block8_6_Activation', # 最后一个激活层 - 备选
+                #  'add_20',              # 最后一个 Add 层 (Block8_6 输出) - 优先尝试
+                 'Block8_6_Conv2d_1x1', # 最后一个激活层 - 备选
                  'Mixed_7a',           # Block8 之前的混合层 - 备选
                  'Block17_10_Activation' # Block17 最后一个块的输出 - 备选 (8x8)
             ]
@@ -138,7 +138,8 @@ class DeepFaceRecognizer:
                     # 预热 fdid_extractor (可选但推荐)
                     dummy_input = np.zeros((1, self.target_size[0], self.target_size[1], 3), dtype=np.float32)
                     _ = self.fdid_extractor(dummy_input, training=False) # 使用 training=False
-                    self.logger.info(f"成功创建 fdid 提取器，输出层: '{self.fdid_layer_name}', 输出形状: {target_layer.output_shape}")
+                    output_shape = target_layer.output.shape if hasattr(target_layer, 'output') else "未知"
+                    self.logger.info(f"成功创建 fdid 提取器，输出层: '{self.fdid_layer_name}', 输出形状: {output_shape}")
                     self.initialized = True # 标记完全初始化成功
                 except Exception as e_fdid:
                     self.logger.error(f"创建 fdid 提取器失败: {e_fdid}", exc_info=True); self.fdid_extractor = None; self.logger.warning("只能提供 fgid 功能。"); self.initialized = True 

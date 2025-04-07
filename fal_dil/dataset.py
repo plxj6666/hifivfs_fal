@@ -135,7 +135,7 @@ class FALDataset(Dataset):
         max_item_retries = 5
         for retry_count in range(max_item_retries):
             video_path = self.video_files[index] if retry_count == 0 else self.video_files[random.randint(0, len(self)-1)]
-            
+
             cap = cv2.VideoCapture(str(video_path))
             if not cap.isOpened():
                 logger.warning(f"尝试 {retry_count+1}/{max_item_retries}: 打开视频失败 {video_path}")
@@ -165,6 +165,9 @@ class FALDataset(Dataset):
                  continue # 尝试下一个随机视频
 
             # --- 加载 V' 参考帧 ---
+            # 注意：对于 SVD 训练，V' 主要用于 FAL loss 计算，如果 FAL loss 不在 SVD 中计算，
+            # 或者 Lrec/Ltid 计算方式改变，可能不再需要加载 V'。
+            # 但为了保持与原 Dataset 兼容，暂时保留加载。
             try:
                 reference_frame_idx = random.randint(0, total_frames - 1)
                 cap.set(cv2.CAP_PROP_POS_FRAMES, reference_frame_idx)
@@ -176,13 +179,13 @@ class FALDataset(Dataset):
                  if retry_count == max_item_retries - 1: raise e
                  continue # 尝试下一个随机视频
             finally:
-                 cap.release() # 确保 VideoCapture 被释放
+                 # 无论如何都要释放
+                 if cap.isOpened():
+                    cap.release()
 
-            # --- 处理 V' (逻辑不变) ---
-# 修改V'处理部分
-
-# --- 处理 V' ---
+            # --- 处理 V' (用于可能的 FAL loss 计算) ---
             try:
+                v_prime_latent_or_img = None # 初始化
                 if self.use_vae_latent:
                     if self.vae is not None:
                         # 直接使用VAE模型
@@ -190,35 +193,40 @@ class FALDataset(Dataset):
                         v_prime_rgb = cv2.cvtColor(v_prime_resized, cv2.COLOR_BGR2RGB)
                         v_prime_normalized = (v_prime_rgb.astype(np.float32) / 127.5) - 1.0
                         v_prime_chw = np.transpose(v_prime_normalized, (2, 0, 1))
-                        v_prime_tensor = torch.from_numpy(v_prime_chw).unsqueeze(0).cpu()
+                        # 使用 .to(self.vae.device) 确保设备一致性
+                        v_prime_tensor = torch.from_numpy(v_prime_chw).unsqueeze(0).to(self.vae.device)
                         with torch.no_grad():
-                            v_prime_latent = encode_with_vae(self.vae.cpu(), v_prime_tensor, self.vae_scale_factor)
+                            # 假设 encode_with_vae 返回 latent 和 scale_factor
+                            v_prime_latent_or_img = encode_with_vae(self.vae, v_prime_tensor, self.vae_scale_factor)
+                            if isinstance(v_prime_latent_or_img, tuple): # 如果返回多个值
+                                v_prime_latent_or_img = v_prime_latent_or_img[0] # 取第一个作为 latent
                     elif self.vae_encoder_fn:
-                        # 原有逻辑作为备选
+                        # 原有逻辑作为备选 (需要确保 vae_encoder_fn 能处理CPU/GPU)
                         v_prime_resized = cv2.resize(v_prime_frame, (self.image_size_for_vae[1], self.image_size_for_vae[0]))
                         v_prime_rgb = cv2.cvtColor(v_prime_resized, cv2.COLOR_BGR2RGB)
                         v_prime_normalized = (v_prime_rgb.astype(np.float32) / 127.5) - 1.0
                         v_prime_chw = np.transpose(v_prime_normalized, (2, 0, 1))
-                        v_prime_tensor = torch.from_numpy(v_prime_chw).unsqueeze(0) 
-                        v_prime_latent = self.vae_encoder_fn(v_prime_tensor)
-                    else: raise RuntimeError("vae和vae_encoder_fn都为None")
-                else:
+                        v_prime_tensor = torch.from_numpy(v_prime_chw).unsqueeze(0)
+                        v_prime_latent_or_img = self.vae_encoder_fn(v_prime_tensor)
+                        if isinstance(v_prime_latent_or_img, tuple):
+                            v_prime_latent_or_img = v_prime_latent_or_img[0]
+                    else: raise RuntimeError("当 use_vae_latent=True 时, vae 或 vae_encoder_fn 必须提供")
+                else: # 不使用 VAE latent, 直接返回图像
                     v_prime_resized = cv2.resize(v_prime_frame, (self.target_img_size[1], self.target_img_size[0]))
-                    v_prime_normalized = (v_prime_resized.astype(np.float32) / 127.5) - 1.0
-                    v_prime_latent = torch.from_numpy(v_prime_normalized).permute(2, 0, 1) # 返回 (C, H, W)
+                    v_prime_rgb = cv2.cvtColor(v_prime_resized, cv2.COLOR_BGR2RGB) # 转 RGB
+                    v_prime_normalized = (v_prime_rgb.astype(np.float32) / 127.5) - 1.0 # 归一化 [-1, 1]
+                    v_prime_latent_or_img = torch.from_numpy(v_prime_normalized).permute(2, 0, 1).float() # 返回 (C, H, W)
             except Exception as e:
                  logger.warning(f"尝试 {retry_count+1}/{max_item_retries}: 处理 V' 失败 from {video_path}: {e}")
                  if retry_count == max_item_retries - 1: raise e
-                 continue # 尝试下一个随机视频
+                 continue
 
-            # --- 处理 Vt (逻辑不变) ---
-            # 修改Vt处理部分
-
-# --- 处理 Vt ---
+            # --- 处理 Vt ---
             try:
+                vt_latent_or_img = None # 初始化
                 if self.use_vae_latent:
                     if self.vae is not None:
-                        # 直接使用VAE模型
+                        #直接使用VAE模型
                         vae_ready_frames = []
                         for frame in vt_frames_bgr:
                             frame_resized = cv2.resize(frame, (self.image_size_for_vae[1], self.image_size_for_vae[0]))
@@ -226,100 +234,145 @@ class FALDataset(Dataset):
                             frame_normalized = (frame_rgb.astype(np.float32) / 127.5) - 1.0
                             frame_chw = np.transpose(frame_normalized, (2, 0, 1))
                             vae_ready_frames.append(frame_chw)
-                        frames_tensor = torch.from_numpy(np.stack(vae_ready_frames)).cpu()
+                        # 使用 .to(self.vae.device)
+                        frames_tensor = torch.from_numpy(np.stack(vae_ready_frames)).to(self.vae.device)
                         with torch.no_grad():
-                            vt = encode_with_vae(self.vae.cpu(), frames_tensor, self.vae_scale_factor)
+                            vt_latent_or_img = encode_with_vae(self.vae, frames_tensor, self.vae_scale_factor)
+                            if isinstance(vt_latent_or_img, tuple):
+                                vt_latent_or_img = vt_latent_or_img[0]
                     elif self.vae_encoder_fn:
+                        # ... (原有 vae_encoder_fn 逻辑，确保设备处理) ...
                         vae_ready_frames = []
                         for frame in vt_frames_bgr:
-                            frame_resized = cv2.resize(frame, (self.image_size_for_vae[1], self.image_size_for_vae[0]))
-                            frame_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
-                            frame_normalized = (frame_rgb.astype(np.float32) / 127.5) - 1.0
-                            frame_chw = np.transpose(frame_normalized, (2, 0, 1))
-                            vae_ready_frames.append(frame_chw)
+                             frame_resized = cv2.resize(frame, (self.image_size_for_vae[1], self.image_size_for_vae[0]))
+                             frame_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
+                             frame_normalized = (frame_rgb.astype(np.float32) / 127.5) - 1.0
+                             frame_chw = np.transpose(frame_normalized, (2, 0, 1))
+                             vae_ready_frames.append(frame_chw)
                         frames_tensor = torch.from_numpy(np.stack(vae_ready_frames))
-                        vt = self.vae_encoder_fn(frames_tensor) # (N, C_lat, H_lat, W_lat)
-                    else: raise RuntimeError("vae_encoder_fn is None")
-                else:
+                        vt_latent_or_img = self.vae_encoder_fn(frames_tensor) # (N, C_lat, H_lat, W_lat)
+                        if isinstance(vt_latent_or_img, tuple):
+                             vt_latent_or_img = vt_latent_or_img[0]
+                    else: raise RuntimeError("当 use_vae_latent=True 时, vae 或 vae_encoder_fn 必须提供")
+                else: # 不使用 VAE latent, 直接返回图像
                     processed_frames = []
                     for frame in vt_frames_bgr:
                         frame_resized = cv2.resize(frame, (self.target_img_size[1], self.target_img_size[0]))
-                        frame_normalized = (frame_resized.astype(np.float32) / 127.5) - 1.0
-                        frame_tensor = torch.from_numpy(frame_normalized).permute(2, 0, 1)
+                        frame_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB) # 转 RGB
+                        frame_normalized = (frame_rgb.astype(np.float32) / 127.5) - 1.0 # 归一化 [-1, 1]
+                        frame_tensor = torch.from_numpy(frame_normalized).permute(2, 0, 1).float()
                         processed_frames.append(frame_tensor)
-                    vt = torch.stack(processed_frames) # (N, 3, H, W)
+                    vt_latent_or_img = torch.stack(processed_frames) # (N, 3, H, W)
             except Exception as e:
                  logger.warning(f"尝试 {retry_count+1}/{max_item_retries}: 处理 Vt 失败 from {video_path}: {e}")
                  if retry_count == max_item_retries - 1: raise e
-                 continue # 尝试下一个随机视频
-                 
-            # --- **** 修改：获取 fgid 和 fdid **** ---
-            # 从 vt_frames_bgr 中随机选一帧用于提取源身份
-            random_frame_for_source_id = random.choice(vt_frames_bgr)
-            
-            # 调用修改后的 extract_identity 获取 fgid 和 fdid
-            fgid_np, fdid_np = self.face_recognizer.extract_identity(random_frame_for_source_id)
+                 continue
 
-            if fgid_np is None or fdid_np is None:
-                logger.warning(f"尝试 {retry_count+1}/{max_item_retries}: 未能从 {video_path} 提取源身份特征 (fgid 或 fdid 为 None)。")
-                if retry_count == max_item_retries - 1: raise ValueError("多次尝试后仍无法提取源身份特征")
-                continue # 尝试下一个随机视频
-                
-            # 将 NumPy 转换为 Tensor
-            fgid_source = torch.from_numpy(fgid_np).float() # (embed_dim,)
-            # fdid 是 (H', W', C')，需要转为 (C', H', W')
-            fdid_source = torch.from_numpy(fdid_np).permute(2, 0, 1).float() # (C_fdid, H_fdid, W_fdid)
+            # --- 获取源身份信息 ---
+            try:
+                # 从 vt_frames_bgr 中随机选一帧用于提取源身份
+                random_frame_for_source_id = random.choice(vt_frames_bgr)
 
-            # --- **** 修改：选择 frid 和对应的 fdid_ref **** ---
-            if random.random() < 0.5:
-                # 使用相同身份
-                frid = fgid_source.clone()
-                fdid_ref = fdid_source.clone() # **** 使用相同的 fdid ****
-                is_same_identity = torch.tensor(True)
-            else:
-                # 使用不同身份 (加载随机人脸的 fgid 和 fdid)
-                frid_numpy, fdid_random_numpy = self._load_random_face_features_for_frid()
-                
-                if frid_numpy is None or fdid_random_numpy is None:
-                     logger.warning(f"尝试 {retry_count+1}/{max_item_retries}: 未能加载随机参考身份特征。")
-                     if retry_count == max_item_retries - 1: raise ValueError("多次尝试后仍无法加载随机参考身份特征")
-                     continue # 尝试下一个随机视频
-                     
-                frid = torch.from_numpy(frid_numpy).float()
-                # **** 使用随机加载的 fdid ****
-                fdid_ref = torch.from_numpy(fdid_random_numpy).permute(2, 0, 1).float() 
-                is_same_identity = torch.tensor(False)
+                # 1. 获取对齐后的源人脸图像 (用于 DILEmbedder 输入)
+                # 使用 _preprocess_face_for_recognition 获取 BGR uint8 图像
+                aligned_source_face_bgr = self._preprocess_face_for_recognition(random_frame_for_source_id)
+                if aligned_source_face_bgr is None:
+                    logger.warning(f"尝试 {retry_count+1}/{max_item_retries}: 未能从 {video_path} 对齐源人脸图像。")
+                    # 根据策略决定是重试还是跳过
+                    if retry_count == max_item_retries - 1: raise ValueError("多次尝试后仍无法对齐源人脸图像")
+                    continue # 尝试下一个随机视频
 
-            # --- **** 修改：调整返回字典和形状 **** ---
-            # fgid 和 frid 需要扩展到 (N, embed_dim)
-            # fdid_ref 需要扩展到 (N, C_fdid, H_fdid, W_fdid)
-            # is_same_identity 需要扩展到 (N, 1)
-            
-            # unsqueeze(0) 在第0维增加一个维度, repeat 在第0维重复 num_frames 次
-            fgid_source_repeated = fgid_source.unsqueeze(0).repeat(self.num_frames, 1) 
-            frid_repeated = frid.unsqueeze(0).repeat(self.num_frames, 1)
-            fdid_ref_repeated = fdid_ref.unsqueeze(0).repeat(self.num_frames, 1, 1, 1) # 在第0维增加并重复
-            is_same_identity_repeated = is_same_identity.unsqueeze(0).repeat(self.num_frames, 1)
+                # 转换对齐后的人脸图像为 Tensor (RGB, [-1, 1])
+                aligned_source_face_rgb = cv2.cvtColor(aligned_source_face_bgr, cv2.COLOR_BGR2RGB)
+                aligned_source_face_normalized = (aligned_source_face_rgb.astype(np.float32) / 127.5) - 1.0
+                source_image_tensor = torch.from_numpy(aligned_source_face_normalized).permute(2, 0, 1).float() # (C, H_align, W_align)
+
+                # 2. 调用 extract_identity 获取 fgid 和 fdid
+                # 假设 extract_identity 接受原始 BGR 帧
+                fgid_np, fdid_np = self.face_recognizer.extract_identity(random_frame_for_source_id)
+                # 如果 extract_identity 接受对齐后的 BGR 帧:
+                # fgid_np, fdid_np = self.face_recognizer.extract_identity(aligned_source_face_bgr)
+
+                if fgid_np is None or fdid_np is None:
+                    logger.warning(f"尝试 {retry_count+1}/{max_item_retries}: 未能从 {video_path} 提取源身份特征 (fgid 或 fdid 为 None)。")
+                    if retry_count == max_item_retries - 1: raise ValueError("多次尝试后仍无法提取源身份特征")
+                    continue # 尝试下一个随机视频
+
+                # 将 NumPy 转换为 Tensor
+                fgid_source = torch.from_numpy(fgid_np).float() # (embed_dim,)
+                # fdid 是 (H', W', C')，需要转为 (C', H', W')
+                fdid_source_permuted = torch.from_numpy(fdid_np).permute(2, 0, 1).float() # (C_fdid, H_fdid, W_fdid)
+
+            except Exception as e:
+                 logger.warning(f"尝试 {retry_count+1}/{max_item_retries}: 获取源身份信息失败 from {video_path}: {e}")
+                 if retry_count == max_item_retries - 1: raise e
+                 continue
+
+            # --- 选择参考身份信息 (用于 FAL loss 计算) ---
+            try:
+                if random.random() < 0.5:
+                    # 使用相同身份
+                    frid = fgid_source.clone()
+                    fdid_ref = fdid_source_permuted.clone() # 使用源 fdid 作为参考
+                    is_same_identity = torch.tensor(True)
+                else:
+                    # 使用不同身份 (加载随机人脸的 fgid 和 fdid)
+                    frid_numpy, fdid_random_numpy = self._load_random_face_features_for_frid()
+
+                    if frid_numpy is None or fdid_random_numpy is None:
+                         logger.warning(f"尝试 {retry_count+1}/{max_item_retries}: 未能加载随机参考身份特征。")
+                         if retry_count == max_item_retries - 1: raise ValueError("多次尝试后仍无法加载随机参考身份特征")
+                         continue # 尝试下一个随机视频
+
+                    frid = torch.from_numpy(frid_numpy).float()
+                    fdid_ref = torch.from_numpy(fdid_random_numpy).permute(2, 0, 1).float() # 使用随机加载的 fdid 作为参考
+                    is_same_identity = torch.tensor(False)
+            except Exception as e:
+                 logger.warning(f"尝试 {retry_count+1}/{max_item_retries}: 选择参考身份失败 from {video_path}: {e}")
+                 if retry_count == max_item_retries - 1: raise e
+                 continue
+
+            # --- 扩展维度以匹配视频帧数 N (num_frames) ---
+            # fgid, frid, fdid_ref, is_same_identity 用于损失计算，通常需要与 vt 的 N 维度对齐
+            try:
+                fgid_source_repeated = fgid_source.unsqueeze(0).repeat(self.num_frames, 1)
+                frid_repeated = frid.unsqueeze(0).repeat(self.num_frames, 1)
+                fdid_ref_repeated = fdid_ref.unsqueeze(0).repeat(self.num_frames, 1, 1, 1)
+                is_same_identity_repeated = is_same_identity.unsqueeze(0).repeat(self.num_frames, 1)
+            except Exception as e:
+                 logger.warning(f"尝试 {retry_count+1}/{max_item_retries}: 扩展维度失败 from {video_path}: {e}")
+                 if retry_count == max_item_retries - 1: raise e
+                 continue
 
             # 如果所有步骤都成功，跳出重试循环
-            break 
-            
+            logger.debug(f"成功处理视频: {video_path}")
+            break
+        else:
+            # 如果循环正常结束（没有 break），说明所有重试都失败了
+             raise RuntimeError(f"在 {max_item_retries} 次尝试后无法成功处理 index {index} 的数据")
+
+
         # --- 返回结果 ---
         return {
-            "vt": vt,                         # (N, C_lat, H_lat, W_lat) 或 (N, 3, H, W)
-            "fgid": fgid_source_repeated,     # **** 源 fgid (N, 512) ****
-            "frid": frid_repeated,            # **** 参考 frid (N, 512) ****
-            "fdid": fdid_ref_repeated,        # **** 参考 fdid (N, C_fdid, H_fdid, W_fdid) ****
-            "is_same_identity": is_same_identity_repeated, # (N, 1)
-            "v_prime_latent": v_prime_latent  # (1, C_lat, H_lat, W_lat) 或 (C, H, W)
+            # === 主要输入 ===
+            "vt": vt_latent_or_img,                 # 目标视频 VAE latent 或 图像 (N, C, H, W)
+            "source_image": source_image_tensor,    # 对齐后的源人脸图像 Tensor (C_img, H_img, W_img)
+            "fdid_source": fdid_source_permuted,    # 源身份详细特征图 (C_fdid, H_fdid, W_fdid)
+
+            # === 用于损失计算 ===
+            "fgid": fgid_source_repeated,           # 源身份全局特征 (N, EmbedDim) - 用于 Lid
+            "frid": frid_repeated,                  # 参考身份全局特征 (N, EmbedDim) - 用于 Ltid
+            "fdid_ref": fdid_ref_repeated,          # 参考身份详细特征 (N, C_fdid, H_fdid, W_fdid) - 用于可能的 FAL loss
+            "is_same_identity": is_same_identity_repeated, # 是否 frid==fgid (N, 1) - 用于 Lrec, Ltid
+            "v_prime_latent": v_prime_latent_or_img # V' VAE latent 或 图像 (C_lat,H_lat,W_lat) or (C,H,W) - 用于可能的 FAL loss
+            # 注意：v_prime_latent 的 batch size 可能是 1，而其他是 N
         }
-    
 # test_dataset.py
 if __name__ == '__main__':
      logging.basicConfig(level=logging.DEBUG) # 启用 DEBUG 日志看详细信息
      
      # 初始化 face_recognizer (假设代码在 utils 下)
-     from hifivfs_fal.utils.face_recognition import DeepFaceRecognizer
+     from fal_dil.utils.face_recognition import DeepFaceRecognizer
      recognizer = DeepFaceRecognizer()
      
      # 初始化 dataset (需要 VAE 和 encoder fn，或者设置 use_vae_latent=False)
