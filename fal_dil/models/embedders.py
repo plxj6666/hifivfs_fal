@@ -9,7 +9,7 @@ import numpy as np
 
 # 导入必要的父类和模块 (请确保路径正确)
 try:
-    from ...svd.sgm.modules.encoders.modules import AbstractEmbModel
+    from svd.sgm.modules.encoders.modules import AbstractEmbModel
 except ImportError:
     # Placeholder - 实际项目中需要确保能正确导入
     class AbstractEmbModel(nn.Module):
@@ -53,6 +53,7 @@ class DILEmbedder(AbstractEmbModel):
         self._input_key = input_key
         self.output_key = output_key # 存储输出键
         self._is_trainable = False # DIL 不训练
+        self.legacy_ucg_val = None # 兼容旧版 UCG
 
         # 设置为 eval 模式并禁用梯度
         try: # 假设 face_recognizer 有 model 属性
@@ -159,7 +160,7 @@ class AttributeEmbedder(AbstractEmbModel):
         self._input_key = input_key
         self.output_key = output_key # 存储输出键
         self._is_trainable = True # FAL Encoder 通常是需要训练的
-
+        self.legacy_ucg_val = None
         self.f_attr_channels = 1280 # 从 AttributeEncoder 定义可知
         self.target_dim = unet_cross_attn_dim
 
@@ -169,7 +170,7 @@ class AttributeEmbedder(AbstractEmbModel):
                     f"f_attr 将从 {self.f_attr_channels} 维投影到 {self.target_dim} 维。")
 
         # 如果需要训练，确保梯度开启
-        if self.is_trainable:
+        if self._is_trainable:
              for param in self.attribute_encoder.parameters(): param.requires_grad = True
              for param in self.projection.parameters(): param.requires_grad = True
 

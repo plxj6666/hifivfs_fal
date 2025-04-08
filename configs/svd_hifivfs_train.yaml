@@ -6,7 +6,7 @@ data:
   target: fal_dil.dataset.FALDataset # 使用我们修改后的 Dataset
   params:
     video_list_file: "/root/HiFiVFS/data/vox2_curated_train.txt" # 你的训练数据列表
-    num_frames: 16 # SVD 通常处理稍长序列，例如 14 或 16 帧
+    num_frames: 2 # SVD 通常处理稍长序列，例如 14 或 16 帧
     use_vae_latent: true # 必须为 true，因为 DiffusionEngine 操作 latent
     image_size_for_vae: [640, 640] # 必须与下面 first_stage_config 使用的 VAE 匹配
     # face_recognizer 和 vae 实例会在主脚本中创建并传递，这里不需要 model_name
@@ -15,9 +15,9 @@ data:
 
 dataloader:
   batch_size: 1 # SVD 通常需要较小 batch size，根据显存调整 (1 或 2)
-  num_workers: 4 # 根据 CPU 调整
+  num_workers: 0 # 根据 CPU 调整
   shuffle: true
-  pin_memory: true
+  pin_memory: false
   drop_last: true
 
 # --- Pytorch Lightning Trainer 配置 ---
@@ -31,7 +31,6 @@ lightning:
     accumulate_grad_batches: 4 # 梯度累积 (示例，根据 batch_size 和显存调整)
     gradient_clip_val: 1.0 # 梯度裁剪值 (匹配 training.clip_grad_norm)
     log_every_n_steps: 10 # 日志记录频率 (步数)
-    val_check_interval: 1000 # (可选) 验证频率 (步数)
     limit_val_batches: 100 # (可选) 限制验证批次数
     # ... 其他 Pytorch Lightning Trainer 参数 ...
 
@@ -143,9 +142,7 @@ model:
       params:
         loss_type: "l2" # 或 l1
         loss_weighting_config:
-          target: svd.sgm.modules.diffusionmodules.loss_weighting.MinSNRLossWeighting # 或其他加权策略
-          params:
-            snr_gamma: 5.0 # MinSNR 论文推荐值
+          target: svd.sgm.modules.diffusionmodules.loss_weighting.EDMWeighting # 或其他加权策略
         sigma_sampler_config:
           target: svd.sgm.modules.diffusionmodules.sigma_sampling.EDMSampling # EDM 对应的采样器
           # params: {} # 可能不需要参数

@@ -33,7 +33,7 @@ class FALDataset(Dataset):
 
     def __init__(self, video_list_file=None, data_root=None, 
                 face_recognizer: DeepFaceRecognizer = None,
-                num_frames=16, 
+                num_frames=4, 
                 target_img_size=(112, 112), 
                 use_vae_latent=True,
                 vae=None,  # 新增：直接接收VAE模型
@@ -364,8 +364,8 @@ class FALDataset(Dataset):
             "frid": frid_repeated,                  # 参考身份全局特征 (N, EmbedDim) - 用于 Ltid
             "fdid_ref": fdid_ref_repeated,          # 参考身份详细特征 (N, C_fdid, H_fdid, W_fdid) - 用于可能的 FAL loss
             "is_same_identity": is_same_identity_repeated, # 是否 frid==fgid (N, 1) - 用于 Lrec, Ltid
-            "v_prime_latent": v_prime_latent_or_img # V' VAE latent 或 图像 (C_lat,H_lat,W_lat) or (C,H,W) - 用于可能的 FAL loss
-            # 注意：v_prime_latent 的 batch size 可能是 1，而其他是 N
+            "v_prime_latent": v_prime_latent_or_img, # V' VAE latent 或 图像 (C_lat,H_lat,W_lat) or (C,H,W) - 用于可能的 FAL loss
+            "num_video_frames": self.num_frames # <<<--- 新增：直接返回帧数
         }
 # test_dataset.py
 if __name__ == '__main__':
