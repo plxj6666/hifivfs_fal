@@ -6,13 +6,16 @@ import sys
 from pathlib import Path
 import logging
 import yaml
-
+from datetime import timedelta
 import torch
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from omegaconf import OmegaConf
+# CUDA 初始化设置
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
 
+os.environ["TORCH_DISTRIBUTED_DEBUG"] = "INFO" # 设置 PyTorch 分布式调试级别
 # --- 确保项目路径在 sys.path 中 ---
 # (如果你的 sgm 和 hifivfs_fal 不是可安装包)
 # current_dir = Path(__file__).resolve().parent
@@ -240,6 +243,19 @@ def main(cfg: OmegaConf, args):
     # --- 5. 启动训练 ---
     # ... (启动训练不变) ...
     logger.info("开始训练...")
+    
+    # 强制设置resume_ckpt_path为None，跳过检查点加载
+    resume_ckpt_path = None
+    logger.info("已禁用检查点恢复，将从头开始训练")
+    
+    # 修改 trainer 配置
+    trainer_params_dict["precision"] = "16-mixed"
+    trainer_params_dict["strategy"] = "ddp"  # 使用原生 DDP
+
+    # 添加内存优化
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     try: trainer.fit(model, datamodule=datamodule, ckpt_path=resume_ckpt_path)
     except Exception as e: logger.error(f"训练过程中发生错误: {e}", exc_info=True); # ...
     finally: logger.info("===== 训练结束 =====")

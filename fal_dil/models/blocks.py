@@ -1,88 +1,94 @@
+# fal_dil/models/blocks.py
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+# --- 新增导入 ---
+from torch.utils.checkpoint import checkpoint as grad_checkpoint
+import logging
+logger = logging.getLogger(__name__)
+# ---
 
 class ResBlock(nn.Module):
-    def __init__(self, channels):
+    # --- 修改 __init__ 添加 use_checkpoint ---
+    def __init__(self, channels, use_checkpoint: bool = False): # <<<--- 添加参数
         super().__init__()
-        # 定义残差块的两个卷积层
-        # 这里保持通道数不变，使用 3x3 卷积核，并用 padding=1 保持 H, W 不变
         self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, stride=1, padding=1)
-        self.relu = nn.ReLU() # 使用 ReLU 作为激活函数
+        self.relu = nn.ReLU()
         self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, stride=1, padding=1)
+        self.use_checkpoint = use_checkpoint # <<<--- 保存参数
+        if self.use_checkpoint:
+             logger.debug("ResBlock initialized with checkpointing ENABLED.")
 
-    def forward(self, x):
-        # 输入 x
+    def _forward_impl(self, x):
+        # 将原 forward 逻辑放入内部方法
         identity = x
-        # 通过两个卷积层和激活函数
         out = self.relu(self.conv1(x))
         out = self.conv2(out)
-        # 跳跃连接：将输出与原始输入相加
         out += identity
-        # 再次通过激活函数（有些设计会放在跳跃连接之前）
         out = self.relu(out)
         return out
 
+    def forward(self, x):
+        # --- 修改 forward 以使用 checkpoint ---
+        if self.use_checkpoint and self.training: # 只在训练时使用 checkpoint
+            # 使用 checkpoint 包裹主要计算
+            # 注意：需要确保 _forward_impl 的输入和输出都是 Tensor 或 Tuple/List of Tensors
+            return grad_checkpoint(self._forward_impl, x, use_reentrant=False)
+        else:
+            # 非训练或不使用 checkpoint 时直接调用
+            return self._forward_impl(x)
+        # ---
+
 
 class SelfAttentionBlock(nn.Module):
-    def __init__(self, channels, num_heads=8):
+    # --- 修改 __init__ 添加 use_checkpoint ---
+    def __init__(self, channels, num_heads=8, use_checkpoint: bool = False): # <<<--- 添加参数
         super().__init__()
         self.channels = channels
         self.num_heads = num_heads
-        
-        # 将token压缩成更小的尺寸
-        self.compress_ratio = 4  # 减少token数量
+        self.compress_ratio = 4
         self.compress = nn.MaxPool2d(kernel_size=self.compress_ratio, stride=self.compress_ratio)
-        
-        # 使用压缩后的token进行注意力计算
         self.mha = nn.MultiheadAttention(embed_dim=channels, num_heads=num_heads, batch_first=True)
         self.ln = nn.LayerNorm(channels)
-        
-        # 更轻量级的前向网络
         self.ff = nn.Sequential(
-            nn.Linear(channels, channels),  # 减少中间隐藏层大小
+            nn.Linear(channels, channels),
             nn.ReLU(),
             nn.Linear(channels, channels)
         )
         self.ln2 = nn.LayerNorm(channels)
+        self.use_checkpoint = use_checkpoint # <<<--- 保存参数
+        if self.use_checkpoint:
+             logger.debug("SelfAttentionBlock initialized with checkpointing ENABLED.")
 
-    def forward(self, x):
-        # x 的形状: (B, C, H, W)
+    def _forward_impl(self, x):
+        # 将原 forward 逻辑放入内部方法
         B, C, H, W = x.shape
-        identity = x  # 保存原始输入用于残差连接
-
-        # 1. 压缩序列长度 (空间池化)
-        x_small = self.compress(x)  # (B, C, H/4, W/4)
+        identity = x
+        x_small = self.compress(x)
         H_small, W_small = H // self.compress_ratio, W // self.compress_ratio
-        
-        # 2. 重塑压缩后的特征图
-        x_reshaped = x_small.view(B, C, H_small * W_small).permute(0, 2, 1)  # (B, H_small*W_small, C)
-
-        # 3. Layer Normalization
+        x_reshaped = x_small.view(B, C, H_small * W_small).permute(0, 2, 1)
         x_norm = self.ln(x_reshaped)
-
-        # 4. Multi-Head Attention (在压缩的序列上)
-        attn_output, _ = self.mha(x_norm, x_norm, x_norm)  # Output: (B, H_small*W_small, C)
-
-        # 5. Residual Connection
+        # --- Multi-Head Attention ---
+        attn_output, _ = self.mha(x_norm, x_norm, x_norm)
+        # ---
         x_res1 = x_reshaped + attn_output
-
-        # 6. Feedforward
         x_norm2 = self.ln2(x_res1)
+        # --- Feedforward ---
         ff_output = self.ff(x_norm2)
-        x_res2 = x_res1 + ff_output  # (B, H_small*W_small, C)
-
-        # 7. 重塑回压缩的特征图
-        x_small_out = x_res2.permute(0, 2, 1).view(B, C, H_small, W_small)  # (B, C, H_small, W_small)
-        
-        # 8. 上采样回原始大小
+        # ---
+        x_res2 = x_res1 + ff_output
+        x_small_out = x_res2.permute(0, 2, 1).view(B, C, H_small, W_small)
         x_upsampled = F.interpolate(x_small_out, size=(H, W), mode='bilinear', align_corners=False)
-        
-        # 9. 残差连接与原始输入
         output = identity + x_upsampled
-
         return output
 
+    def forward(self, x):
+        # --- 修改 forward 以使用 checkpoint ---
+        if self.use_checkpoint and self.training:
+            return grad_checkpoint(self._forward_impl, x, use_reentrant=False)
+        else:
+            return self._forward_impl(x)
 
 class CrossAttentionBlock(nn.Module):
     def __init__(self, query_channels, kv_channels, num_heads=8):

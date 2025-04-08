@@ -8,7 +8,7 @@ data:
     video_list_file: "/root/HiFiVFS/data/vox2_curated_train.txt" # 你的训练数据列表
     num_frames: 2 # SVD 通常处理稍长序列，例如 14 或 16 帧
     use_vae_latent: true # 必须为 true，因为 DiffusionEngine 操作 latent
-    image_size_for_vae: [640, 640] # 必须与下面 first_stage_config 使用的 VAE 匹配
+    image_size_for_vae: [320, 320] # 必须与下面 first_stage_config 使用的 VAE 匹配
     # face_recognizer 和 vae 实例会在主脚本中创建并传递，这里不需要 model_name
     # target_img_size: [112, 112] # 用于对齐源图像
     # fdid_shape: [1792, 3, 3] # 会在主脚本中动态获取
@@ -28,7 +28,7 @@ lightning:
     devices: 1 # 或你使用的 GPU 数量
     precision: 16 # 使用混合精度 (bf16 或 16)
     max_epochs: 50 # 总训练轮数 (示例)
-    accumulate_grad_batches: 4 # 梯度累积 (示例，根据 batch_size 和显存调整)
+    accumulate_grad_batches: 8 # 梯度累积 (示例，根据 batch_size 和显存调整)
     gradient_clip_val: 1.0 # 梯度裁剪值 (匹配 training.clip_grad_norm)
     log_every_n_steps: 10 # 日志记录频率 (步数)
     limit_val_batches: 100 # (可选) 限制验证批次数
@@ -57,9 +57,9 @@ model:
         in_channels: 4 # VAE latent channels
         out_channels: 4
         model_channels: 320 # SVD 基础通道数 (示例)
-        attention_resolutions: [4, 2, 1] # 在哪些下采样级别使用注意力 (示例)
-        num_res_blocks: 2 # 每个级别的残差块数 (示例)
-        channel_mult: [1, 2, 4, 4] # 通道倍增器 (示例)
+        attention_resolutions: [4] # 在哪些下采样级别使用注意力 (示例), 减了两层一层注意力
+        num_res_blocks: 1 # 每个级别的残差块数 (示例)，残差块继续减
+        channel_mult: [1, 2, 4] # 通道倍增器 (示例) ，减小
         num_heads: 8 # 注意力头数 (示例)
         # num_head_channels: 64 # 或者指定每个头的通道数
         # use_spatial_transformer: true # SVD 通常使用 Spatial Transformer
@@ -94,7 +94,7 @@ model:
           in_channels: 3
           out_ch: 3
           ch: 128
-          ch_mult: [1, 2, 4, 4]
+          ch_mult: [1, 2, 4]
           num_res_blocks: 2
           attn_resolutions: []
           dropout: 0.0
@@ -206,5 +206,7 @@ model:
 
     # --- Attribute Encoder (传递给 DiffusionEngine) ---
     attribute_encoder_config:
-       target: fal_dil.models.encoder.AttributeEncoder
-       params: {} # 如果 Encoder 不需要参数
+      target: fal_dil.models.encoder.AttributeEncoder
+      params: 
+        use_checkpoint: true # 启用 checkpointing 节省显存
+      

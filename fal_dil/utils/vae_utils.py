@@ -40,7 +40,17 @@ def decode_with_vae(vae: AutoencoderKL, latents: torch.Tensor, scale_factor: flo
     # 确保 latent 在 VAE 所在的设备上
     latents = latents.to(dtype=vae.dtype, device=vae.device) 
     latents_unscaled = latents / scale_factor
-    image = vae.decode(latents_unscaled).sample
+    
+    # 调用解码并处理不同的返回类型
+    decoded = vae.decode(latents_unscaled)
+    
+    # 处理可能的返回类型
+    if hasattr(decoded, 'sample'):
+        # 如果是分布对象 (如 DiagonalGaussianDistribution)
+        image = decoded.sample
+    else:
+        # 如果直接返回张量
+        image = decoded 
     # 返回的 image 在 VAE 设备上，范围 [-1, 1]
     return image
 

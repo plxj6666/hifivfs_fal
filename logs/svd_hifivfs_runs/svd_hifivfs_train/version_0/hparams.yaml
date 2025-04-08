@@ -1,0 +1,109 @@
+network_config:
+  target: svd.sgm.modules.diffusionmodules.video_model.VideoUNet
+  params:
+    in_channels: 4
+    out_channels: 4
+    model_channels: 320
+    attention_resolutions:
+    - 4
+    num_res_blocks: 1
+    channel_mult:
+    - 1
+    - 2
+    - 4
+    num_heads: 8
+    transformer_depth: 1
+    context_dim: 768
+    use_checkpoint: true
+    video_kernel_size: 3
+denoiser_config:
+  target: svd.sgm.modules.diffusionmodules.denoiser.Denoiser
+  params:
+    scaling_config:
+      target: svd.sgm.modules.diffusionmodules.denoiser_scaling.EDMScaling
+first_stage_config:
+  target: svd.sgm.models.autoencoder.AutoencoderKL
+  params:
+    embed_dim: 4
+    monitor: val/rec_loss
+    ddconfig:
+      double_z: true
+      z_channels: 4
+      resolution: 256
+      in_channels: 3
+      out_ch: 3
+      ch: 128
+      ch_mult:
+      - 1
+      - 2
+      - 4
+      num_res_blocks: 2
+      attn_resolutions: []
+      dropout: 0.0
+    lossconfig:
+      target: torch.nn.Identity
+sampler_config:
+  target: svd.sgm.modules.diffusionmodules.sampling.EulerEDMSampler
+  params:
+    num_steps: 40
+    discretization_config:
+      target: svd.sgm.modules.diffusionmodules.discretizer.EDMDiscretization
+    guider_config:
+      target: svd.sgm.modules.diffusionmodules.guiders.VanillaCFG
+      params:
+        scale: 5.0
+optimizer_config:
+  target: torch.optim.AdamW
+  params:
+    weight_decay: 0.01
+    betas:
+    - 0.9
+    - 0.999
+scheduler_config:
+  target: svd.sgm.lr_scheduler.LambdaLinearScheduler
+  params:
+    warm_up_steps:
+    - 1000
+    cycle_lengths:
+    - 10000000000000
+    f_start:
+    - 1.0e-06
+    f_max:
+    - 1.0
+    f_min:
+    - 1.0
+loss_fn_config:
+  target: svd.sgm.modules.diffusionmodules.loss.StandardDiffusionLoss
+  params:
+    loss_type: l2
+    loss_weighting_config:
+      target: svd.sgm.modules.diffusionmodules.loss_weighting.EDMWeighting
+    sigma_sampler_config:
+      target: svd.sgm.modules.diffusionmodules.sigma_sampling.EDMSampling
+network_wrapper: null
+use_ema: true
+ema_decay_rate: 0.9999
+scale_factor: 0.18215
+disable_first_stage_autocast: false
+input_key: vt
+log_keys: null
+no_cond_log: false
+compile_model: false
+en_and_decode_n_samples_a_time: null
+attribute_encoder_config:
+  target: fal_dil.models.encoder.AttributeEncoder
+  params:
+    use_checkpoint: true
+face_recognizer_config:
+  target: fal_dil.utils.face_recognition.DeepFaceRecognizer
+  params:
+    model_name: Facenet512
+hifivfs_loss_config:
+  lambda_lid: 5.0
+  lambda_fal: 1.0
+  fal_weights:
+    attribute: 10.0
+    reconstruction: 1.0
+    identity: 10.0
+    identity_margin: 0.5
+f_low_injection: true
