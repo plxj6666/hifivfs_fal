@@ -176,11 +176,20 @@ class AttributeEmbedder(AbstractEmbModel):
 
     def forward(self, vt_latent: torch.Tensor) -> torch.Tensor:
         """
-        Args: vt_latent (torch.Tensor): (B*T, C_lat, H_lat, W_lat)。
-        Returns: torch.Tensor: f_attr token 序列, (B*T, N_tokens=400, C_out=unet_cross_attn_dim)。
+        支持处理(B, T, C, H, W)形状的视频输入
+        
+        Args: vt_latent (torch.Tensor): (B, T, C, H, W) 或 (B*T, C, H, W)
+        Returns: torch.Tensor: f_attr token 序列, (B*T, N_tokens=400, C_out)
         """
+        # 检查输入是否是5D视频张量(B, T, C, H, W)
+        if vt_latent.ndim == 5:
+            # 重新排列为(B*T, C, H, W)
+            B, T, C, H, W = vt_latent.shape
+            vt_latent = vt_latent.reshape(B*T, C, H, W)
+            logger.info(f"AttributeEmbedder: 将视频输入从(B,T,C,H,W)={B,T,C,H,W}重新排列为(B*T,C,H,W)={vt_latent.shape}")
+        
         if vt_latent.ndim != 4:
-            logger.error(f"AttributeEmbedder 输入形状错误! 期望 (B*T, C, H, W), 收到: {vt_latent.shape}")
+            logger.error(f"AttributeEmbedder 输入形状错误! 期望 (B*T, C, H, W) 或 (B, T, C, H, W), 收到: {vt_latent.shape}")
             bt = vt_latent.shape[0] if vt_latent.ndim > 0 else 1
             return torch.zeros((bt, 20*20, self.target_dim), device=vt_latent.device, dtype=vt_latent.dtype)
 

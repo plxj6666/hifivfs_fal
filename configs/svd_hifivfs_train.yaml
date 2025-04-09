@@ -9,9 +9,6 @@ data:
     num_frames: 2 # SVD 通常处理稍长序列，例如 14 或 16 帧
     use_vae_latent: true # 必须为 true，因为 DiffusionEngine 操作 latent
     image_size_for_vae: [320, 320] # 必须与下面 first_stage_config 使用的 VAE 匹配
-    # face_recognizer 和 vae 实例会在主脚本中创建并传递，这里不需要 model_name
-    # target_img_size: [112, 112] # 用于对齐源图像
-    # fdid_shape: [1792, 3, 3] # 会在主脚本中动态获取
 
 dataloader:
   batch_size: 1 # SVD 通常需要较小 batch size，根据显存调整 (1 或 2)
@@ -28,9 +25,9 @@ lightning:
     devices: 1 # 或你使用的 GPU 数量
     precision: 16 # 使用混合精度 (bf16 或 16)
     max_epochs: 50 # 总训练轮数 (示例)
-    accumulate_grad_batches: 8 # 梯度累积 (示例，根据 batch_size 和显存调整)
+    accumulate_grad_batches: 16 # 梯度累积 (示例，根据 batch_size 和显存调整)
     gradient_clip_val: 1.0 # 梯度裁剪值 (匹配 training.clip_grad_norm)
-    log_every_n_steps: 10 # 日志记录频率 (步数)
+    log_every_n_steps: 1 # 日志记录频率 (步数)
     limit_val_batches: 100 # (可选) 限制验证批次数
     # ... 其他 Pytorch Lightning Trainer 参数 ...
 
@@ -145,7 +142,6 @@ model:
           target: svd.sgm.modules.diffusionmodules.loss_weighting.EDMWeighting # 或其他加权策略
         sigma_sampler_config:
           target: svd.sgm.modules.diffusionmodules.sigma_sampling.EDMSampling # EDM 对应的采样器
-          # params: {} # 可能不需要参数
 
     # --- Sampler 配置 (用于推理，训练时可选) ---
     sampler_config:
@@ -183,7 +179,7 @@ model:
 
     # --- VAE 相关 ---
     scale_factor: 0.18215 # 与 vae 配置匹配
-    disable_first_stage_autocast: false
+    disable_first_stage_autocast: true
 
     # --- HiFiVFS 损失配置 (传递给 DiffusionEngine) ---
     hifivfs_loss_config:

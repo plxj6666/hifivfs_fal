@@ -3,7 +3,7 @@ network_config:
   params:
     in_channels: 4
     out_channels: 4
-    model_channels: 320
+    model_channels: 256
     attention_resolutions:
     - 4
     num_res_blocks: 1
@@ -84,7 +84,7 @@ network_wrapper: null
 use_ema: true
 ema_decay_rate: 0.9999
 scale_factor: 0.18215
-disable_first_stage_autocast: false
+disable_first_stage_autocast: true
 input_key: vt
 log_keys: null
 no_cond_log: false
